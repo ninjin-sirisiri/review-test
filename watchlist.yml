@@ -1,0 +1,4 @@
+targets:
+  - name: Python
+    blog: https://blog.python.org/feeds/posts/default?alt=rss
+    releases: https://github.com/python/cpython/releases

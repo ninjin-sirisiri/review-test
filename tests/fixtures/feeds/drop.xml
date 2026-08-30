@@ -1,0 +1,28 @@
+<?xml version="1.0"?>
+<rss version="2.0">
+  <channel>
+    <item>
+      <link>https://example.com/no-title</link>
+      <pubDate>Mon, 02 Jan 2026 00:00:00 +0000</pubDate>
+    </item>
+    <item>
+      <title>JS</title>
+      <link>javascript:alert(1)</link>
+      <pubDate>Mon, 02 Jan 2026 00:00:00 +0000</pubDate>
+    </item>
+    <item>
+      <title>NoDate</title>
+      <link>https://example.com/no-date</link>
+    </item>
+    <item>
+      <title>   </title>
+      <link>https://example.com/blank-title</link>
+      <pubDate>Mon, 02 Jan 2026 00:00:00 +0000</pubDate>
+    </item>
+    <item>
+      <title>Keep</title>
+      <link>https://example.com/keep</link>
+      <pubDate>Mon, 02 Jan 2026 00:00:00 +0000</pubDate>
+    </item>
+  </channel>
+</rss>

@@ -1,0 +1,10 @@
+<?xml version="1.0"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <entry>
+    <title>Atom Title</title>
+    <link href="https://example.com/atom-item"/>
+    <summary>Atom sum</summary>
+    <published>2026-01-03T07:08:09Z</published>
+    <content>THIS IS BODY DO NOT USE</content>
+  </entry>
+</feed>

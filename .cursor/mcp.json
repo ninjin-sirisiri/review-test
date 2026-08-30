@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "ai-code-review": {
+      "command": "bun",
+      "args": [
+        "${workspaceFolder}/.cursor/plugins/ai-code-review-cursor/bin/adapter.mjs",
+        "mcp"
+      ],
+      "env": {
+        "AI_REVIEW_REPOSITORY_ROOT": "${workspaceFolder}",
+        "CURSOR_PLUGIN_ROOT": "${workspaceFolder}/.cursor/plugins/ai-code-review-cursor"
+      }
+    }
+  }
+}

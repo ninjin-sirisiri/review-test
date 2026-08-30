@@ -1,0 +1,45 @@
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [
+      {
+        "command": ".cursor/plugins/ai-code-review-cursor/bin/ai-review-session-start",
+        "timeout": 15
+      }
+    ],
+    "beforeSubmitPrompt": [
+      {
+        "command": ".cursor/plugins/ai-code-review-cursor/bin/ai-review-session-start",
+        "timeout": 10
+      }
+    ],
+    "preToolUse": [
+      {
+        "command": ".cursor/plugins/ai-code-review-cursor/bin/ai-review-pre-edit",
+        "matcher": "Write|StrReplace|ApplyPatch|Delete|EditNotebook|MultiEdit|Edit",
+        "timeout": 10,
+        "failClosed": true
+      },
+      {
+        "command": ".cursor/plugins/ai-code-review-cursor/bin/ai-review-pre-edit",
+        "matcher": "Shell",
+        "timeout": 10,
+        "failClosed": true
+      }
+    ],
+    "beforeShellExecution": [
+      {
+        "command": ".cursor/plugins/ai-code-review-cursor/bin/ai-review-pre-edit",
+        "timeout": 10,
+        "failClosed": true
+      }
+    ],
+    "postToolUse": [
+      {
+        "command": ".cursor/plugins/ai-code-review-cursor/bin/ai-review-post-edit",
+        "matcher": "Write|StrReplace|ApplyPatch|Delete|EditNotebook|MultiEdit|Edit",
+        "timeout": 10
+      }
+    ]
+  }
+}

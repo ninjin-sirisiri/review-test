@@ -51,6 +51,15 @@ def test_timeout() -> None:
     assert exc.value.reason == "timeout"
 
 
+def test_urlerror_timeout_reason() -> None:
+    def urlopen(req: Request, timeout: float | None = None) -> FakeResp:
+        raise URLError(TimeoutError())
+
+    with pytest.raises(FetchError) as exc:
+        fetch_feed("https://example.com/feed.xml", urlopen=urlopen)
+    assert exc.value.reason == "timeout"
+
+
 def test_urlerror() -> None:
     def urlopen(req: Request, timeout: float | None = None) -> FakeResp:
         raise URLError("no")

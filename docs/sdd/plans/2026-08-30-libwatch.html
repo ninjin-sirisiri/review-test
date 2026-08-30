@@ -1,0 +1,1027 @@
+<!DOCTYPE html>
+<html lang="und">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src &#x27;none&#x27;; img-src &#x27;self&#x27; data:; style-src &#x27;self&#x27;; base-uri &#x27;none&#x27;; form-action &#x27;none&#x27;; frame-ancestors &#x27;none&#x27;">
+<title>ライブラリ更新ウォッチ Implementation Plan</title>
+<link rel="stylesheet" href="../assets/sdd.css">
+</head>
+<body>
+<main>
+<h1>ライブラリ更新ウォッチ Implementation Plan</h1>
+<p><strong>Goal:</strong> <code>watchlist.yml</code> からフィードを取り込み、静的なタイムライン HTML を <code>python3 -m libwatch</code> で出す。</p>
+<p><strong>Architecture:</strong> 実行時サーバも DB も無い。設定を読み、GitHub Releases URL を Atom フィードに揃え、源を順に GET し、件を正規化・ソート・重複排除して <code>site/</code> に書く。失敗した源はスキップし、設定エラーだけ非ゼロで終わる。</p>
+<p><strong>Tech Stack:</strong> Python 3.11+、pytest、PyYAML。HTTP は stdlib <code>urllib</code>。RSS 2.0 と Atom 1.0 は stdlib <code>xml.etree.ElementTree</code>。HTML エスケープは <code>html.escape</code>。</p>
+<p><strong>Spec:</strong> docs/sdd/specs/2026-08-30-libwatch-design.md</p>
+<h2>Global Constraints</h2>
+<ul>
+<li>実装は Python 3.11 以上。既定テストはネットワークに出ない。</li>
+<li>HTTP タイムアウト: 更新源あたり 15 秒。</li>
+<li>フィード取得サイズ上限: 2 MiB。</li>
+<li>リダイレクト: 最大 5 回。</li>
+<li>取り込み: 順次。並列度 1。</li>
+<li>GitHub Actions 間隔: 6 時間。</li>
+<li>User-Agent: <code>LibWatch/0.1</code>。</li>
+<li>要約: 切らない。RSS <code>description</code> または Atom <code>summary</code> だけ。Atom <code>content</code> は使わない。</li>
+<li>フィード件数: フィードが返した件。こちらで上限なし。次ページは辿らない。</li>
+<li>ビルドコマンドはリポジトリ直下で <code>python3 -m libwatch</code>。設定の正本は <code>watchlist.yml</code>。成果物は <code>site/index.html</code>。</li>
+<li>設定エラーは終了コード非ゼロで <code>site/</code> を触らない。取り込み失敗はその源だけスキップしビルド成功してよい。</li>
+<li>認証ヘッダは付けない。本文転載・生成要約・既読・画面からの登録 UI・GitHub Pages 公開は作らない。</li>
+<li>スキップ行の形式は <code>skip source: {name} {blog|releases} {url}: {reason}</code>。</li>
+<li>空のタイムラインの文言は「更新はまだない」。</li>
+<li>GitHub Releases フィードは常に <code>https://github.com/{owner}/{repo}/releases.atom</code>。</li>
+</ul>
+<h2>File structure</h2>
+<table>
+<thead>
+<tr>
+  <th>Path</th>
+  <th>Responsibility</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+  <td><code>pyproject.toml</code></td>
+  <td>パッケージ、依存、pytest、requires-python <code>&gt;=3.11</code></td>
+</tr>
+<tr>
+  <td><code>.gitignore</code></td>
+  <td><code>site/</code>、<code>.sdd/</code>、venv、pycache</td>
+</tr>
+<tr>
+  <td><code>src/libwatch/__init__.py</code></td>
+  <td>空でよい</td>
+</tr>
+<tr>
+  <td><code>src/libwatch/__main__.py</code></td>
+  <td><code>python3 -m libwatch</code> 入口</td>
+</tr>
+<tr>
+  <td><code>src/libwatch/github_url.py</code></td>
+  <td>GitHub Releases URL → Atom URL</td>
+</tr>
+<tr>
+  <td><code>src/libwatch/config.py</code></td>
+  <td><code>watchlist.yml</code> の検証と読み込み</td>
+</tr>
+<tr>
+  <td><code>src/libwatch/feed.py</code></td>
+  <td>フィードバイト列 → 件</td>
+</tr>
+<tr>
+  <td><code>src/libwatch/merge.py</code></td>
+  <td>ソートと同一リンクの 1 件化</td>
+</tr>
+<tr>
+  <td><code>src/libwatch/fetch.py</code></td>
+  <td>HTTP GET（タイムアウト・サイズ・リダイレクト）</td>
+</tr>
+<tr>
+  <td><code>src/libwatch/render.py</code></td>
+  <td>HTML と CSS 文字列</td>
+</tr>
+<tr>
+  <td><code>src/libwatch/write.py</code></td>
+  <td><code>site/</code> の一時ファイル置き換え</td>
+</tr>
+<tr>
+  <td><code>src/libwatch/build.py</code></td>
+  <td>全体のオーケストレーションと終了コード</td>
+</tr>
+<tr>
+  <td><code>tests/</code></td>
+  <td>ネットワーク禁止の pytest</td>
+</tr>
+<tr>
+  <td><code>watchlist.yml</code></td>
+  <td>読者用サンプル（Task 6）</td>
+</tr>
+<tr>
+  <td><code>.github/workflows/libwatch-build.yml</code></td>
+  <td>6 時間ごとのビルドと artifact（Task 6）</td>
+</tr>
+</tbody>
+</table>
+<p>この表に無いアプリファイルを足さない。Node ツールチェーンを足さない。</p>
+<h2>Task 1: GitHub URL 解決と設定読み込み</h2>
+<p><strong>Files:</strong></p>
+<ul>
+<li>Create: <code>pyproject.toml</code></li>
+<li>Create: <code>.gitignore</code></li>
+<li>Create: <code>src/libwatch/__init__.py</code> (empty)</li>
+<li>Create: <code>src/libwatch/github_url.py</code></li>
+<li>Create: <code>src/libwatch/config.py</code></li>
+<li>Create: <code>tests/test_github_url.py</code></li>
+<li>Create: <code>tests/test_config.py</code></li>
+</ul>
+<p><strong>Interfaces:</strong></p>
+<ul>
+<li><p><code>GitHubReleasesUrlError</code></p>
+</li>
+<li><p><code>resolve_releases_feed_url(url: str) -&gt; str</code></p>
+</li>
+<li><p><code>ConfigError</code></p>
+</li>
+<li><p><code>WatchTarget(name: str, blog: str | None, releases: str | None)</code> — <code>releases</code> は解決後の Atom URL。<code>blog</code> はフラグメントを除いた絶対 URL。</p>
+</li>
+<li><p><code>Watchlist(targets: tuple[WatchTarget, ...])</code></p>
+</li>
+<li><p><code>load_watchlist(path: Path) -&gt; Watchlist</code> — 失敗は <code>ConfigError</code></p>
+</li>
+<li><p>[ ] <strong>Step 1: ハーネスを置く</strong></p>
+</li>
+</ul>
+<p><code>pyproject.toml</code>:</p>
+<pre><code class="language-toml">[build-system]
+requires = [&quot;setuptools&gt;=68&quot;]
+build-backend = &quot;setuptools.build_meta&quot;
+
+[project]
+name = &quot;libwatch&quot;
+version = &quot;0.1.0&quot;
+requires-python = &quot;&gt;=3.11&quot;
+dependencies = [&quot;PyYAML&quot;]
+
+[project.optional-dependencies]
+dev = [&quot;pytest&quot;]
+
+[tool.setuptools.packages.find]
+where = [&quot;src&quot;]
+
+[tool.pytest.ini_options]
+testpaths = [&quot;tests&quot;]
+</code></pre>
+<p><code>.gitignore</code>:</p>
+<pre><code class="language-text">.sdd/
+site/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+</code></pre>
+<p>空の <code>src/libwatch/__init__.py</code> を作る。リポジトリ直下で <code>python3 -m pip install -e &quot;.[dev]&quot;</code> を実行する。</p>
+<ul>
+<li>[ ] <strong>Step 2: 失敗するテストを書く</strong></li>
+</ul>
+<p><code>tests/test_github_url.py</code>:</p>
+<pre><code class="language-python">import pytest
+
+from libwatch.github_url import GitHubReleasesUrlError, resolve_releases_feed_url
+
+
+@pytest.mark.parametrize(
+    (&quot;url&quot;, &quot;expected&quot;),
+    [
+        (
+            &quot;https://github.com/facebook/react&quot;,
+            &quot;https://github.com/facebook/react/releases.atom&quot;,
+        ),
+        (
+            &quot;https://github.com/facebook/react/&quot;,
+            &quot;https://github.com/facebook/react/releases.atom&quot;,
+        ),
+        (
+            &quot;https://github.com/facebook/react/releases&quot;,
+            &quot;https://github.com/facebook/react/releases.atom&quot;,
+        ),
+        (
+            &quot;https://github.com/facebook/react/releases/&quot;,
+            &quot;https://github.com/facebook/react/releases.atom&quot;,
+        ),
+        (
+            &quot;https://github.com/facebook/react/releases.atom&quot;,
+            &quot;https://github.com/facebook/react/releases.atom&quot;,
+        ),
+        (
+            &quot;http://GitHub.COM/Foo/Bar/releases.atom&quot;,
+            &quot;https://github.com/Foo/Bar/releases.atom&quot;,
+        ),
+        (
+            &quot;https://github.com/facebook/react/releases?foo=1#x&quot;,
+            &quot;https://github.com/facebook/react/releases.atom&quot;,
+        ),
+    ],
+)
+def test_resolve_releases_feed_url(url: str, expected: str) -&gt; None:
+    assert resolve_releases_feed_url(url) == expected
+
+
+@pytest.mark.parametrize(
+    &quot;url&quot;,
+    [
+        &quot;https://gitlab.com/facebook/react/releases&quot;,
+        &quot;https://www.github.com/facebook/react&quot;,
+        &quot;https://github.com/facebook/react/releases/tag/v1.0.0&quot;,
+        &quot;https://github.com/facebook/react/tree/main&quot;,
+        &quot;https://gist.github.com/foo/bar&quot;,
+        &quot;not-a-url&quot;,
+        &quot;https://github.com/facebook&quot;,
+    ],
+)
+def test_resolve_releases_feed_url_rejects(url: str) -&gt; None:
+    with pytest.raises(GitHubReleasesUrlError):
+        resolve_releases_feed_url(url)
+</code></pre>
+<p><code>tests/test_config.py</code>:</p>
+<pre><code class="language-python">from pathlib import Path
+
+import pytest
+
+from libwatch.config import ConfigError, load_watchlist
+
+
+def _write(path: Path, text: str) -&gt; Path:
+    path.write_text(text, encoding=&quot;utf-8&quot;)
+    return path
+
+
+def test_load_valid_watchlist(tmp_path: Path) -&gt; None:
+    path = _write(
+        tmp_path / &quot;watchlist.yml&quot;,
+        &quot;&quot;&quot;
+targets:
+  - name: &quot; React &quot;
+    blog: https://react.dev/rss.xml#frag
+    releases: https://github.com/facebook/react/releases
+&quot;&quot;&quot;,
+    )
+    watchlist = load_watchlist(path)
+    assert len(watchlist.targets) == 1
+    target = watchlist.targets[0]
+    assert target.name == &quot;React&quot;
+    assert target.blog == &quot;https://react.dev/rss.xml&quot;
+    assert target.releases == &quot;https://github.com/facebook/react/releases.atom&quot;
+
+
+def test_blog_only_or_releases_only(tmp_path: Path) -&gt; None:
+    blog_only = load_watchlist(
+        _write(
+            tmp_path / &quot;blog.yml&quot;,
+            &quot;targets:\n  - name: A\n    blog: https://example.com/feed.xml\n&quot;,
+        )
+    )
+    assert blog_only.targets[0].releases is None
+    rel_only = load_watchlist(
+        _write(
+            tmp_path / &quot;rel.yml&quot;,
+            &quot;targets:\n  - name: B\n    releases: https://github.com/a/b\n&quot;,
+        )
+    )
+    assert rel_only.targets[0].blog is None
+
+
+@pytest.mark.parametrize(
+    &quot;text&quot;,
+    [
+        &quot;targets: []\n&quot;,
+        &quot;targets:\n  - name: A\n&quot;,
+        &quot;targets:\n  - name: A\n    blog: ''\n    releases: ''\n&quot;,
+        &quot;targets:\n  - name: '  '\n    blog: https://example.com/feed.xml\n&quot;,
+        &quot;targets:\n  - name: A\n    blog: https://example.com/feed.xml\n  - name: A\n    releases: https://github.com/a/b\n&quot;,
+        &quot;targets:\n  - name: A\n    blog: example.com/feed.xml\n&quot;,
+        &quot;targets:\n  - name: A\n    releases: https://gitlab.com/a/b\n&quot;,
+        &quot;extra: 1\ntargets:\n  - name: A\n    blog: https://example.com/feed.xml\n&quot;,
+        &quot;targets:\n  - name: A\n    blog: https://example.com/feed.xml\n    extra: 1\n&quot;,
+        &quot;not: yaml: [&quot;,
+    ],
+)
+def test_load_watchlist_rejects(tmp_path: Path, text: str) -&gt; None:
+    path = tmp_path / &quot;watchlist.yml&quot;
+    path.write_text(text, encoding=&quot;utf-8&quot;)
+    with pytest.raises(ConfigError):
+        load_watchlist(path)
+
+
+def test_missing_file(tmp_path: Path) -&gt; None:
+    with pytest.raises(ConfigError):
+        load_watchlist(tmp_path / &quot;missing.yml&quot;)
+
+
+def test_invalid_utf8(tmp_path: Path) -&gt; None:
+    path = tmp_path / &quot;watchlist.yml&quot;
+    path.write_bytes(b&quot;\xff\xfe&quot;)
+    with pytest.raises(ConfigError):
+        load_watchlist(path)
+</code></pre>
+<ul>
+<li>[ ] <strong>Step 3: テストを走らせ、失敗することを確認する</strong></li>
+</ul>
+<pre><code class="language-bash">python3 -m pytest tests/test_github_url.py tests/test_config.py -q
+</code></pre>
+<p>失敗理由は <code>libwatch</code> を import できない、または関数が無いこと。</p>
+<ul>
+<li>[ ] <strong>Step 4: 最小実装</strong></li>
+</ul>
+<p><code>src/libwatch/github_url.py</code> と <code>src/libwatch/config.py</code> を、上のインタフェースどおりに実装する。</p>
+<p><code>resolve_releases_feed_url</code>: <code>urlparse</code> で scheme は <code>http</code>/<code>https</code>（大小無視）。<code>hostname</code> を小文字化して <code>github.com</code> と一致。<code>username</code> / <code>password</code> があればエラー。クエリとフラグメントは無視。path は <code>/{owner}/{repo}</code>、任意で <code>/releases</code> または <code>/releases.atom</code>、任意の末尾 <code>/</code>。owner/repo は <code>[A-Za-z0-9._-]+</code>。戻り値は <code>https://github.com/{owner}/{repo}/releases.atom</code>（owner/repo の大小はそのまま、ホストは <code>github.com</code>）。</p>
+<p><code>load_watchlist</code>: UTF-8 で読む。<code>yaml.safe_load</code>。トップレベルは dict でキーは <code>targets</code> のみ。<code>targets</code> は list で 0 件不可。各要素は dict、キーは <code>name</code> / <code>blog</code> / <code>releases</code> のみ。<code>name</code> は前後空白除去後に非空。除去後の <code>name</code> 重複はエラー。<code>blog</code> / <code>releases</code> は欠ける・<code>None</code>・空白のみなら無し。どちらも無しならエラー。<code>blog</code> は <code>urlparse</code> で scheme が <code>http</code> または <code>https</code> の絶対 URL（<code>hostname</code> 必須）。フラグメントは除いて保存。<code>releases</code> は <code>resolve_releases_feed_url</code> に渡す。YAML として読めない・UTF-8 でない・ファイルが無いのは <code>ConfigError</code>。</p>
+<ul>
+<li>[ ] <strong>Step 5: テストを通す</strong></li>
+</ul>
+<pre><code class="language-bash">python3 -m pytest tests/test_github_url.py tests/test_config.py -q
+</code></pre>
+<ul>
+<li>[ ] <strong>Step 6: コミット</strong></li>
+</ul>
+<pre><code class="language-bash">git add pyproject.toml .gitignore src/libwatch/__init__.py src/libwatch/github_url.py src/libwatch/config.py tests/test_github_url.py tests/test_config.py
+git commit -m &quot;$(cat &lt;&lt;'EOF'
+GitHub Releases URL の解決と watchlist.yml の検証を入れる。
+
+EOF
+)&quot;
+</code></pre>
+<h2>Task 2: フィード本文の正規化</h2>
+<p><strong>Files:</strong></p>
+<ul>
+<li>Create: <code>src/libwatch/feed.py</code></li>
+<li>Create: <code>tests/test_feed.py</code></li>
+<li>Create: <code>tests/fixtures/feeds/rss.xml</code></li>
+<li>Create: <code>tests/fixtures/feeds/atom.xml</code></li>
+<li>Create: <code>tests/fixtures/feeds/relative.xml</code></li>
+<li>Create: <code>tests/fixtures/feeds/drop.xml</code></li>
+<li>Create: <code>tests/fixtures/feeds/empty_rss.xml</code></li>
+<li>Create: <code>tests/fixtures/feeds/not_feed.xml</code></li>
+</ul>
+<p><strong>Interfaces:</strong></p>
+<ul>
+<li><code>FeedError</code> — バイト列が RSS 2.0 でも Atom 1.0 でもない</li>
+<li><code>Entry(target_name: str, kind: Literal[&quot;blog&quot;, &quot;releases&quot;], title: str, link: str, summary: str | None, published: datetime)</code> — <code>published</code> は UTC aware</li>
+<li><code>parse_feed(body: bytes, *, feed_url: str, target_name: str, kind: Literal[&quot;blog&quot;, &quot;releases&quot;]) -&gt; list[Entry]</code></li>
+</ul>
+<p>対応する XML はルートが <code>rss</code>（RSS 2.0）または <code>{http://www.w3.org/2005/Atom}feed</code> のみ。RSS 1.0 / RDF は <code>FeedError</code>。</p>
+<ul>
+<li>[ ] <strong>Step 1: フィクスチャと失敗するテスト</strong></li>
+</ul>
+<p><code>tests/fixtures/feeds/rss.xml</code>:</p>
+<pre><code class="language-xml">&lt;?xml version=&quot;1.0&quot;?&gt;
+&lt;rss version=&quot;2.0&quot;&gt;
+  &lt;channel&gt;
+    &lt;item&gt;
+      &lt;title&gt;Rss Title&lt;/title&gt;
+      &lt;link&gt;https://example.com/rss-item&lt;/link&gt;
+      &lt;description&gt;Rss desc&lt;/description&gt;
+      &lt;pubDate&gt;Mon, 02 Jan 2026 15:04:05 +0000&lt;/pubDate&gt;
+    &lt;/item&gt;
+  &lt;/channel&gt;
+&lt;/rss&gt;
+</code></pre>
+<p><code>tests/fixtures/feeds/atom.xml</code>:</p>
+<pre><code class="language-xml">&lt;?xml version=&quot;1.0&quot;?&gt;
+&lt;feed xmlns=&quot;http://www.w3.org/2005/Atom&quot;&gt;
+  &lt;entry&gt;
+    &lt;title&gt;Atom Title&lt;/title&gt;
+    &lt;link href=&quot;https://example.com/atom-item&quot;/&gt;
+    &lt;summary&gt;Atom sum&lt;/summary&gt;
+    &lt;published&gt;2026-01-03T07:08:09Z&lt;/published&gt;
+    &lt;content&gt;THIS IS BODY DO NOT USE&lt;/content&gt;
+  &lt;/entry&gt;
+&lt;/feed&gt;
+</code></pre>
+<p><code>tests/fixtures/feeds/relative.xml</code>:</p>
+<pre><code class="language-xml">&lt;?xml version=&quot;1.0&quot;?&gt;
+&lt;rss version=&quot;2.0&quot;&gt;
+  &lt;channel&gt;
+    &lt;item&gt;
+      &lt;title&gt;Rel&lt;/title&gt;
+      &lt;link&gt;/rel-path&lt;/link&gt;
+      &lt;pubDate&gt;Mon, 02 Jan 2026 00:00:00 +0000&lt;/pubDate&gt;
+    &lt;/item&gt;
+  &lt;/channel&gt;
+&lt;/rss&gt;
+</code></pre>
+<p><code>tests/fixtures/feeds/drop.xml</code>:</p>
+<pre><code class="language-xml">&lt;?xml version=&quot;1.0&quot;?&gt;
+&lt;rss version=&quot;2.0&quot;&gt;
+  &lt;channel&gt;
+    &lt;item&gt;
+      &lt;link&gt;https://example.com/no-title&lt;/link&gt;
+      &lt;pubDate&gt;Mon, 02 Jan 2026 00:00:00 +0000&lt;/pubDate&gt;
+    &lt;/item&gt;
+    &lt;item&gt;
+      &lt;title&gt;JS&lt;/title&gt;
+      &lt;link&gt;javascript:alert(1)&lt;/link&gt;
+      &lt;pubDate&gt;Mon, 02 Jan 2026 00:00:00 +0000&lt;/pubDate&gt;
+    &lt;/item&gt;
+    &lt;item&gt;
+      &lt;title&gt;NoDate&lt;/title&gt;
+      &lt;link&gt;https://example.com/no-date&lt;/link&gt;
+    &lt;/item&gt;
+    &lt;item&gt;
+      &lt;title&gt;   &lt;/title&gt;
+      &lt;link&gt;https://example.com/blank-title&lt;/link&gt;
+      &lt;pubDate&gt;Mon, 02 Jan 2026 00:00:00 +0000&lt;/pubDate&gt;
+    &lt;/item&gt;
+    &lt;item&gt;
+      &lt;title&gt;Keep&lt;/title&gt;
+      &lt;link&gt;https://example.com/keep&lt;/link&gt;
+      &lt;pubDate&gt;Mon, 02 Jan 2026 00:00:00 +0000&lt;/pubDate&gt;
+    &lt;/item&gt;
+  &lt;/channel&gt;
+&lt;/rss&gt;
+</code></pre>
+<p><code>tests/fixtures/feeds/empty_rss.xml</code>:</p>
+<pre><code class="language-xml">&lt;?xml version=&quot;1.0&quot;?&gt;
+&lt;rss version=&quot;2.0&quot;&gt;
+  &lt;channel&gt;
+    &lt;title&gt;Empty&lt;/title&gt;
+  &lt;/channel&gt;
+&lt;/rss&gt;
+</code></pre>
+<p><code>tests/fixtures/feeds/not_feed.xml</code>:</p>
+<pre><code class="language-xml">&lt;?xml version=&quot;1.0&quot;?&gt;&lt;html&gt;&lt;body&gt;no&lt;/body&gt;&lt;/html&gt;
+</code></pre>
+<p><code>tests/test_feed.py</code>:</p>
+<pre><code class="language-python">from datetime import datetime, timezone
+from pathlib import Path
+
+import pytest
+
+from libwatch.feed import FeedError, parse_feed
+
+FIXTURES = Path(__file__).parent / &quot;fixtures&quot; / &quot;feeds&quot;
+
+
+def test_parse_rss() -&gt; None:
+    entries = parse_feed(
+        (FIXTURES / &quot;rss.xml&quot;).read_bytes(),
+        feed_url=&quot;https://example.com/feed.xml&quot;,
+        target_name=&quot;Lib&quot;,
+        kind=&quot;blog&quot;,
+    )
+    assert len(entries) == 1
+    entry = entries[0]
+    assert entry.title == &quot;Rss Title&quot;
+    assert entry.link == &quot;https://example.com/rss-item&quot;
+    assert entry.summary == &quot;Rss desc&quot;
+    assert entry.kind == &quot;blog&quot;
+    assert entry.target_name == &quot;Lib&quot;
+    assert entry.published == datetime(2026, 1, 2, 15, 4, 5, tzinfo=timezone.utc)
+
+
+def test_parse_atom_ignores_content() -&gt; None:
+    entries = parse_feed(
+        (FIXTURES / &quot;atom.xml&quot;).read_bytes(),
+        feed_url=&quot;https://example.com/atom.xml&quot;,
+        target_name=&quot;Lib&quot;,
+        kind=&quot;releases&quot;,
+    )
+    assert len(entries) == 1
+    assert entries[0].summary == &quot;Atom sum&quot;
+    assert entries[0].title == &quot;Atom Title&quot;
+    assert &quot;BODY&quot; not in (entries[0].summary or &quot;&quot;)
+    assert entries[0].published == datetime(2026, 1, 3, 7, 8, 9, tzinfo=timezone.utc)
+
+
+def test_relative_link() -&gt; None:
+    entries = parse_feed(
+        (FIXTURES / &quot;relative.xml&quot;).read_bytes(),
+        feed_url=&quot;https://example.com/feed.xml&quot;,
+        target_name=&quot;Lib&quot;,
+        kind=&quot;blog&quot;,
+    )
+    assert entries[0].link == &quot;https://example.com/rel-path&quot;
+
+
+def test_drop_bad_items() -&gt; None:
+    entries = parse_feed(
+        (FIXTURES / &quot;drop.xml&quot;).read_bytes(),
+        feed_url=&quot;https://example.com/feed.xml&quot;,
+        target_name=&quot;Lib&quot;,
+        kind=&quot;blog&quot;,
+    )
+    assert [e.title for e in entries] == [&quot;Keep&quot;]
+    assert entries[0].link == &quot;https://example.com/keep&quot;
+
+
+def test_empty_feed() -&gt; None:
+    entries = parse_feed(
+        (FIXTURES / &quot;empty_rss.xml&quot;).read_bytes(),
+        feed_url=&quot;https://example.com/feed.xml&quot;,
+        target_name=&quot;Lib&quot;,
+        kind=&quot;blog&quot;,
+    )
+    assert entries == []
+
+
+def test_not_a_feed() -&gt; None:
+    with pytest.raises(FeedError):
+        parse_feed(
+            (FIXTURES / &quot;not_feed.xml&quot;).read_bytes(),
+            feed_url=&quot;https://example.com/feed.xml&quot;,
+            target_name=&quot;Lib&quot;,
+            kind=&quot;blog&quot;,
+        )
+</code></pre>
+<ul>
+<li>[ ] <strong>Step 2: 失敗を確認</strong></li>
+</ul>
+<pre><code class="language-bash">python3 -m pytest tests/test_feed.py -q
+</code></pre>
+<ul>
+<li>[ ] <strong>Step 3: 実装</strong></li>
+</ul>
+<p><code>src/libwatch/feed.py</code>:</p>
+<ul>
+<li><p>不正 XML は <code>FeedError</code>。</p>
+</li>
+<li><p>RSS: <code>channel/item</code>。<code>title</code> テキスト、<code>link</code> テキスト、<code>description</code> のみ要約（<code>content:encoded</code> は見ない）。<code>pubDate</code> は <code>email.utils.parsedate_to_datetime</code>。</p>
+</li>
+<li><p>Atom: namespace <code>http://www.w3.org/2005/Atom</code>。<code>entry</code>。<code>title</code>、<code>link</code> は <code>rel=&quot;alternate&quot;</code> を優先し無ければ最初の <code>href</code>。<code>summary</code> のみ。<code>content</code> は無視。日時は <code>published</code>、無ければ <code>updated</code>。<code>Z</code> は UTC。</p>
+</li>
+<li><p>日時が naive なら UTC とみなす。aware なら UTC に変換。</p>
+</li>
+<li><p>タイトルが空または空白のみ、リンクが解決後 <code>http://</code>/<code>https://</code> 以外（<code>javascript:</code> 含む）、日時が無い／パース不能は件を落とす（源全体のエラーにしない）。</p>
+</li>
+<li><p>リンクは <code>urllib.parse.urljoin(feed_url, raw_link)</code>。</p>
+</li>
+<li><p>要約が空または空白のみなら <code>None</code>。切らない。HTML タグはここでは剥がさない。</p>
+</li>
+<li><p>[ ] <strong>Step 4: テストを通す</strong></p>
+</li>
+</ul>
+<pre><code class="language-bash">python3 -m pytest tests/test_feed.py tests/test_github_url.py tests/test_config.py -q
+</code></pre>
+<ul>
+<li>[ ] <strong>Step 5: コミット</strong></li>
+</ul>
+<pre><code class="language-bash">git add src/libwatch/feed.py tests/test_feed.py tests/fixtures/feeds
+git commit -m &quot;$(cat &lt;&lt;'EOF'
+RSS と Atom の件を正規化し、本文 content を要約に使わない。
+
+EOF
+)&quot;
+</code></pre>
+<h2>Task 3: タイムラインの並びと重複排除</h2>
+<p><strong>Files:</strong></p>
+<ul>
+<li>Create: <code>src/libwatch/merge.py</code></li>
+<li>Create: <code>tests/test_merge.py</code></li>
+</ul>
+<p><strong>Interfaces:</strong></p>
+<ul>
+<li><p><code>merge_entries(entries: list[Entry]) -&gt; list[Entry]</code> — 新しいリスト。入力は変えない。</p>
+</li>
+<li><p>[ ] <strong>Step 1: 失敗するテスト</strong></p>
+</li>
+</ul>
+<p><code>tests/test_merge.py</code>:</p>
+<pre><code class="language-python">from datetime import datetime, timezone
+
+from libwatch.feed import Entry
+from libwatch.merge import merge_entries
+
+UTC = timezone.utc
+
+
+def _e(
+    *,
+    name: str,
+    title: str,
+    link: str,
+    published: datetime,
+    kind: str = &quot;blog&quot;,
+    summary: str | None = None,
+) -&gt; Entry:
+    return Entry(
+        target_name=name,
+        kind=kind,  # type: ignore[arg-type]
+        title=title,
+        link=link,
+        summary=summary,
+        published=published,
+    )
+
+
+def test_sort_by_published_then_name_then_title() -&gt; None:
+    early = datetime(2026, 1, 1, tzinfo=UTC)
+    late = datetime(2026, 1, 2, tzinfo=UTC)
+    same = datetime(2026, 1, 3, tzinfo=UTC)
+    entries = [
+        _e(name=&quot;B&quot;, title=&quot;b&quot;, link=&quot;https://e/1&quot;, published=early),
+        _e(name=&quot;A&quot;, title=&quot;z&quot;, link=&quot;https://e/2&quot;, published=late),
+        _e(name=&quot;C&quot;, title=&quot;m&quot;, link=&quot;https://e/3&quot;, published=same),
+        _e(name=&quot;A&quot;, title=&quot;a&quot;, link=&quot;https://e/4&quot;, published=same),
+    ]
+    merged = merge_entries(entries)
+    assert [e.link for e in merged] == [
+        &quot;https://e/4&quot;,
+        &quot;https://e/3&quot;,
+        &quot;https://e/2&quot;,
+        &quot;https://e/1&quot;,
+    ]
+
+
+def test_same_link_keeps_newer() -&gt; None:
+    link = &quot;https://e/same&quot;
+    older = _e(name=&quot;A&quot;, title=&quot;old&quot;, link=link, published=datetime(2026, 1, 1, tzinfo=UTC))
+    newer = _e(name=&quot;B&quot;, title=&quot;new&quot;, link=link, published=datetime(2026, 1, 2, tzinfo=UTC))
+    merged = merge_entries([older, newer])
+    assert len(merged) == 1
+    assert merged[0].title == &quot;new&quot;
+
+
+def test_same_link_same_time_prefers_releases() -&gt; None:
+    link = &quot;https://e/same&quot;
+    when = datetime(2026, 1, 1, tzinfo=UTC)
+    blog = _e(name=&quot;A&quot;, title=&quot;blog&quot;, link=link, published=when, kind=&quot;blog&quot;)
+    rel = _e(name=&quot;B&quot;, title=&quot;rel&quot;, link=link, published=when, kind=&quot;releases&quot;)
+    merged = merge_entries([blog, rel])
+    assert len(merged) == 1
+    assert merged[0].kind == &quot;releases&quot;
+
+
+def test_same_link_same_time_same_kind_prefers_name_then_title() -&gt; None:
+    link = &quot;https://e/same&quot;
+    when = datetime(2026, 1, 1, tzinfo=UTC)
+    z = _e(name=&quot;Z&quot;, title=&quot;a&quot;, link=link, published=when, kind=&quot;blog&quot;)
+    a_late = _e(name=&quot;A&quot;, title=&quot;z&quot;, link=link, published=when, kind=&quot;blog&quot;)
+    a_early = _e(name=&quot;A&quot;, title=&quot;a&quot;, link=link, published=when, kind=&quot;blog&quot;)
+    merged = merge_entries([z, a_late, a_early])
+    assert len(merged) == 1
+    assert merged[0].target_name == &quot;A&quot;
+    assert merged[0].title == &quot;a&quot;
+
+
+def test_does_not_mutate_input() -&gt; None:
+    entries = [
+        _e(name=&quot;A&quot;, title=&quot;a&quot;, link=&quot;https://e/1&quot;, published=datetime(2026, 1, 1, tzinfo=UTC))
+    ]
+    snapshot = list(entries)
+    merge_entries(entries)
+    assert entries == snapshot
+</code></pre>
+<ul>
+<li>[ ] <strong>Step 2: 失敗を確認</strong></li>
+</ul>
+<pre><code class="language-bash">python3 -m pytest tests/test_merge.py -q
+</code></pre>
+<ul>
+<li>[ ] <strong>Step 3: 実装</strong></li>
+</ul>
+<p><code>src/libwatch/merge.py</code>:</p>
+<pre><code class="language-python">from __future__ import annotations
+
+from libwatch.feed import Entry
+
+
+def _winner(left: Entry, right: Entry) -&gt; Entry:
+    if left.published != right.published:
+        return left if left.published &gt; right.published else right
+    left_rel = left.kind == &quot;releases&quot;
+    right_rel = right.kind == &quot;releases&quot;
+    if left_rel != right_rel:
+        return left if left_rel else right
+    if left.target_name != right.target_name:
+        return left if left.target_name &lt; right.target_name else right
+    if left.title != right.title:
+        return left if left.title &lt; right.title else right
+    return left
+
+
+def merge_entries(entries: list[Entry]) -&gt; list[Entry]:
+    by_link: dict[str, Entry] = {}
+    for entry in entries:
+        current = by_link.get(entry.link)
+        if current is None:
+            by_link[entry.link] = entry
+        else:
+            by_link[entry.link] = _winner(current, entry)
+    return sorted(
+        by_link.values(),
+        key=lambda e: (-e.published.timestamp(), e.target_name, e.title),
+    )
+</code></pre>
+<ul>
+<li>[ ] <strong>Step 4: テストを通す</strong></li>
+</ul>
+<pre><code class="language-bash">python3 -m pytest tests/test_merge.py tests/test_feed.py -q
+</code></pre>
+<ul>
+<li>[ ] <strong>Step 5: コミット</strong></li>
+</ul>
+<pre><code class="language-bash">git add src/libwatch/merge.py tests/test_merge.py
+git commit -m &quot;$(cat &lt;&lt;'EOF'
+更新を公開日時順に並べ、同じ公式リンクは1件にする。
+
+EOF
+)&quot;
+</code></pre>
+<h2>Task 4: フィード HTTP 取得</h2>
+<p><strong>Files:</strong></p>
+<ul>
+<li>Create: <code>src/libwatch/fetch.py</code></li>
+<li>Create: <code>tests/test_fetch.py</code></li>
+</ul>
+<p><strong>Interfaces:</strong></p>
+<ul>
+<li><code>FetchError(reason: str)</code> — <code>reason</code> はスキップ行の <code>{reason}</code> にそのまま使う</li>
+<li><code>fetch_feed(url: str, *, urlopen: Callable[..., object] | None = None) -&gt; bytes</code></li>
+</ul>
+<p>既定の <code>urlopen</code> は <code>urllib.request.urlopen</code>。自動リダイレクトは使わず、呼び出し側で Location を最大 5 回辿る。テストは必ず fake <code>urlopen</code> を渡す。このファイルのテストから実ネットワークへ出ない。</p>
+<p><code>reason</code> の値は次のみ: <code>timeout</code>、<code>connection failed</code>、<code>HTTP {code}</code>（例 <code>HTTP 404</code>）、<code>too many redirects</code>、<code>too large</code>。</p>
+<ul>
+<li>[ ] <strong>Step 1: 失敗するテスト</strong></li>
+</ul>
+<p><code>tests/test_fetch.py</code>:</p>
+<pre><code class="language-python">from email.message import Message
+from urllib.error import HTTPError, URLError
+from urllib.request import Request
+
+import pytest
+
+from libwatch.fetch import FetchError, fetch_feed
+
+
+class FakeResp:
+    def __init__(self, data: bytes, status: int = 200, headers: dict[str, str] | None = None):
+        self._data = data
+        self._status = status
+        self.headers = Message()
+        for key, value in (headers or {}).items():
+            self.headers[key] = value
+
+    def getcode(self) -&gt; int:
+        return self._status
+
+    def read(self, n: int = -1) -&gt; bytes:
+        if n &lt; 0:
+            return self._data
+        return self._data[:n]
+
+    def __enter__(self) -&gt; &quot;FakeResp&quot;:
+        return self
+
+    def __exit__(self, *args: object) -&gt; None:
+        return None
+
+
+def test_ok_and_user_agent() -&gt; None:
+    seen: list[Request] = []
+
+    def urlopen(req: Request, timeout: float | None = None) -&gt; FakeResp:
+        seen.append(req)
+        assert timeout == 15
+        return FakeResp(b&quot;&lt;rss/&gt;&quot;)
+
+    assert fetch_feed(&quot;https://example.com/feed.xml&quot;, urlopen=urlopen) == b&quot;&lt;rss/&gt;&quot;
+    assert seen[0].get_header(&quot;User-agent&quot;) == &quot;LibWatch/0.1&quot;
+
+
+def test_timeout() -&gt; None:
+    def urlopen(req: Request, timeout: float | None = None) -&gt; FakeResp:
+        raise TimeoutError
+
+    with pytest.raises(FetchError) as exc:
+        fetch_feed(&quot;https://example.com/feed.xml&quot;, urlopen=urlopen)
+    assert exc.value.reason == &quot;timeout&quot;
+
+
+def test_urlerror() -&gt; None:
+    def urlopen(req: Request, timeout: float | None = None) -&gt; FakeResp:
+        raise URLError(&quot;no&quot;)
+
+    with pytest.raises(FetchError) as exc:
+        fetch_feed(&quot;https://example.com/feed.xml&quot;, urlopen=urlopen)
+    assert exc.value.reason == &quot;connection failed&quot;
+
+
+def test_http_404() -&gt; None:
+    def urlopen(req: Request, timeout: float | None = None) -&gt; FakeResp:
+        raise HTTPError(&quot;https://example.com/feed.xml&quot;, 404, &quot;no&quot;, Message(), None)
+
+    with pytest.raises(FetchError) as exc:
+        fetch_feed(&quot;https://example.com/feed.xml&quot;, urlopen=urlopen)
+    assert exc.value.reason == &quot;HTTP 404&quot;
+
+
+def test_redirects_then_ok() -&gt; None:
+    calls: list[str] = []
+
+    def urlopen(req: Request, timeout: float | None = None) -&gt; FakeResp:
+        url = req.full_url
+        calls.append(url)
+        if len(calls) &lt;= 5:
+            return FakeResp(
+                b&quot;&quot;,
+                status=302,
+                headers={&quot;Location&quot;: f&quot;https://example.com/r{len(calls)}&quot;},
+            )
+        return FakeResp(b&quot;&lt;rss/&gt;&quot;, status=200)
+
+    body = fetch_feed(&quot;https://example.com/start&quot;, urlopen=urlopen)
+    assert body == b&quot;&lt;rss/&gt;&quot;
+    assert len(calls) == 6
+
+
+def test_too_many_redirects() -&gt; None:
+    def urlopen(req: Request, timeout: float | None = None) -&gt; FakeResp:
+        return FakeResp(b&quot;&quot;, status=302, headers={&quot;Location&quot;: &quot;https://example.com/next&quot;})
+
+    with pytest.raises(FetchError) as exc:
+        fetch_feed(&quot;https://example.com/start&quot;, urlopen=urlopen)
+    assert exc.value.reason == &quot;too many redirects&quot;
+
+
+def test_content_length_too_large() -&gt; None:
+    def urlopen(req: Request, timeout: float | None = None) -&gt; FakeResp:
+        return FakeResp(b&quot;x&quot;, status=200, headers={&quot;Content-Length&quot;: &quot;2097153&quot;})
+
+    with pytest.raises(FetchError) as exc:
+        fetch_feed(&quot;https://example.com/feed.xml&quot;, urlopen=urlopen)
+    assert exc.value.reason == &quot;too large&quot;
+
+
+def test_body_too_large() -&gt; None:
+    def urlopen(req: Request, timeout: float | None = None) -&gt; FakeResp:
+        return FakeResp(b&quot;x&quot; * (2 * 1024 * 1024 + 1), status=200)
+
+    with pytest.raises(FetchError) as exc:
+        fetch_feed(&quot;https://example.com/feed.xml&quot;, urlopen=urlopen)
+    assert exc.value.reason == &quot;too large&quot;
+</code></pre>
+<ul>
+<li>[ ] <strong>Step 2: 失敗を確認</strong></li>
+</ul>
+<pre><code class="language-bash">python3 -m pytest tests/test_fetch.py -q
+</code></pre>
+<ul>
+<li>[ ] <strong>Step 3: 実装</strong></li>
+</ul>
+<p><code>urllib.request.Request(url, headers={&quot;User-Agent&quot;: &quot;LibWatch/0.1&quot;})</code>。<code>timeout=15</code>。既定の <code>urlopen</code> は <code>HTTPRedirectHandler</code> 無しの opener にし、3xx を <code>getcode()</code> で受けて Location を手動で辿る（stdlib の自動リダイレクトは使わない）。3xx は 301/302/303/307/308。最終が 200 以外は <code>HTTP {code}</code>。本文は最大 <code>2 * 1024 * 1024 + 1</code> バイト読み、超過で <code>too large</code>。</p>
+<ul>
+<li>[ ] <strong>Step 4: テストを通す</strong></li>
+</ul>
+<pre><code class="language-bash">python3 -m pytest tests/test_fetch.py -q
+</code></pre>
+<ul>
+<li>[ ] <strong>Step 5: コミット</strong></li>
+</ul>
+<pre><code class="language-bash">git add src/libwatch/fetch.py tests/test_fetch.py
+git commit -m &quot;$(cat &lt;&lt;'EOF'
+フィード取得にタイムアウト・サイズ上限・リダイレクト回数を入れる。
+
+EOF
+)&quot;
+</code></pre>
+<h2>Task 5: ビルド、HTML、CLI</h2>
+<p><strong>Files:</strong></p>
+<ul>
+<li>Create: <code>src/libwatch/render.py</code></li>
+<li>Create: <code>src/libwatch/write.py</code></li>
+<li>Create: <code>src/libwatch/build.py</code></li>
+<li>Create: <code>src/libwatch/__main__.py</code></li>
+<li>Create: <code>tests/test_render.py</code></li>
+<li>Create: <code>tests/test_write.py</code></li>
+<li>Create: <code>tests/test_build.py</code></li>
+</ul>
+<p><strong>Interfaces:</strong></p>
+<ul>
+<li><code>render_html(entries: list[Entry]) -&gt; str</code></li>
+<li><code>RENDER_CSS: str</code> — 単一カラム。外部 JS 無し。</li>
+<li><code>write_site(site_dir: Path, html: str, css: str) -&gt; None</code> — <code>index.html</code> と <code>style.css</code> を一時ファイルに書いてから <code>os.replace</code>。両方の一時ファイルが揃ってから置き換える。</li>
+<li><code>build(*, cwd: Path, fetch: Callable[[str], bytes], stderr: TextIO) -&gt; int</code></li>
+<li><code>__main__.py</code> は <code>raise SystemExit(build_main())</code>。<code>build_main()</code> は <code>cwd=Path.cwd()</code>、<code>fetch=fetch_feed</code>、<code>stderr=sys.stderr</code>。</li>
+</ul>
+<p><code>render_html</code>:</p>
+<ul>
+<li><code>&lt;!DOCTYPE html&gt;</code>、<code>lang=&quot;ja&quot;</code>、<code>&lt;title&gt;ライブラリ更新ウォッチ&lt;/title&gt;</code>、<code>href=&quot;style.css&quot;</code>。</li>
+<li>件が 0 なら本文に <code>更新はまだない</code>（この文字列そのもの）。</li>
+<li>件があるとき、各件はタイトルを公式リンクの <code>&lt;a href&gt;</code>、あれば要約、ウォッチ対象名、種類、公開日時。</li>
+<li>種類の表示は <code>blog</code> → <code>公式ブログ</code>、<code>releases</code> → <code>リリースノート</code>。</li>
+<li>日時は UTC で <code>YYYY-MM-DD HH:MM UTC</code>（分まで。秒は出さない）。</li>
+<li>タイトル・要約・対象名・種類は <code>html.escape(..., quote=True)</code>。href もエスケープ。要約の HTML は解釈しない。</li>
+<li>失敗した源は出さない（渡された <code>entries</code> だけ）。</li>
+</ul>
+<p><code>build</code>:</p>
+<ul>
+<li><p><code>cwd / &quot;watchlist.yml&quot;</code> を <code>load_watchlist</code>。<code>ConfigError</code> なら stderr にメッセージ、return <code>1</code>。<code>site/</code> を作らない・消さない・上書きしない。</p>
+</li>
+<li><p>対象順、各対象は <code>blog</code> があれば先、<code>releases</code> があれば次。順に <code>fetch(url)</code>。</p>
+</li>
+<li><p><code>FetchError</code> と <code>FeedError</code> とその他の取得例外は、その源をスキップ。<code>stderr</code> に <code>skip source: {name} {blog|releases} {url}: {reason}\n</code>。<code>url</code> は実際に GET した URL（blog は設定の blog、releases は Atom URL）。<code>FeedError</code> の reason は <code>not a feed</code>。その他は <code>connection failed</code>。</p>
+</li>
+<li><p>取れた件を <code>merge_entries</code> し、<code>render_html</code> と <code>RENDER_CSS</code> を <code>cwd / &quot;site&quot;</code> に書く。</p>
+</li>
+<li><p>全部スキップでも return <code>0</code>（空ページ）。</p>
+</li>
+<li><p>[ ] <strong>Step 1: 失敗するテスト</strong></p>
+</li>
+</ul>
+<p><code>tests/test_render.py</code>: 要約に <code>&lt;script&gt;</code> を含む <code>Entry</code> を渡し、出力に生の <code>&lt;script&gt;</code> が無く、エスケープされた文字があること。0 件で <code>更新はまだない</code>。1 件でタイトルが <code>href</code> 付き。日時フォーマット。種類ラベル。</p>
+<p><code>tests/test_write.py</code>: <code>tmp_path</code> に壊れた <code>index.html</code> を置き、<code>write_site</code> が完全な HTML と CSS に置き換える。一時ファイル名が残らない。</p>
+<p><code>tests/test_build.py</code>:</p>
+<ul>
+<li>不正 YAML のとき return 1。事前に書いた <code>site/index.html</code> の内容が変わらない。<code>site</code> が無ければ作られない。</li>
+<li>fake <code>fetch</code> が URL ごとにバイト列または <code>FetchError(&quot;HTTP 404&quot;)</code> を返す。片方失敗でも他方の件が HTML に出る。return 0。stderr が <code>skip source: Lib blog https://example.com/feed.xml: HTTP 404</code> の形（実際の name/url に合わせる）。</li>
+<li>全部 <code>FetchError</code> なら return 0、HTML に <code>更新はまだない</code>。</li>
+<li><code>fetch</code> が Atom content 付き本文を返しても、HTML に <code>THIS IS BODY DO NOT USE</code> が出ない（Task 2 の atom フィクスチャを使う）。</li>
+</ul>
+<p>このタスクのテストから実ネットワークへ出ない。</p>
+<ul>
+<li>[ ] <strong>Step 2: 失敗を確認</strong></li>
+</ul>
+<pre><code class="language-bash">python3 -m pytest tests/test_render.py tests/test_write.py tests/test_build.py -q
+</code></pre>
+<ul>
+<li>[ ] <strong>Step 3: 実装</strong></li>
+</ul>
+<p>上のインタフェースどおり。<code>python3 -m libwatch</code> が <code>build_main</code> を呼ぶ。</p>
+<ul>
+<li>[ ] <strong>Step 4: テストを通す</strong></li>
+</ul>
+<pre><code class="language-bash">python3 -m pytest -q
+</code></pre>
+<p>全テストがネットワーク無しで緑。</p>
+<ul>
+<li>[ ] <strong>Step 5: コミット</strong></li>
+</ul>
+<pre><code class="language-bash">git add src/libwatch/render.py src/libwatch/write.py src/libwatch/build.py src/libwatch/__main__.py tests/test_render.py tests/test_write.py tests/test_build.py
+git commit -m &quot;$(cat &lt;&lt;'EOF'
+ビルドコマンドがタイムライン HTML を site/ に出すようにする。
+
+EOF
+)&quot;
+</code></pre>
+<h2>Task 6: GitHub Actions とサンプル設定</h2>
+<p><strong>Files:</strong></p>
+<ul>
+<li>Create: <code>.github/workflows/libwatch-build.yml</code></li>
+<li>Create: <code>watchlist.yml</code></li>
+<li>Create: <code>tests/test_workflow.py</code></li>
+</ul>
+<p>Actions は任意だが、付ける場合の spec どおり 6 時間ごと、<code>python3 -m libwatch</code>、<code>site/</code> を artifact。Pages は設定しない。このジョブはネットワークに出てよい（テストはファイル内容だけ見る）。</p>
+<ul>
+<li>[ ] <strong>Step 1: 失敗するテスト</strong></li>
+</ul>
+<p><code>tests/test_workflow.py</code>:</p>
+<ul>
+<li><p><code>.github/workflows/libwatch-build.yml</code> が存在する。</p>
+</li>
+<li><p>本文に <code>cron:</code> と <code>0 */6 * * *</code> がある。</p>
+</li>
+<li><p>本文に <code>python3 -m libwatch</code> がある。</p>
+</li>
+<li><p>artifact の path が <code>site/</code> または <code>site</code>。</p>
+</li>
+<li><p><code>peaceiris/actions-gh-pages</code> や <code>github-pages</code> デプロイ step が無い。</p>
+</li>
+<li><p>[ ] <strong>Step 2: 失敗を確認</strong></p>
+</li>
+</ul>
+<pre><code class="language-bash">python3 -m pytest tests/test_workflow.py -q
+</code></pre>
+<ul>
+<li>[ ] <strong>Step 3: ワークフローとサンプル YAML</strong></li>
+</ul>
+<p><code>.github/workflows/libwatch-build.yml</code>:</p>
+<pre><code class="language-yaml">name: libwatch-build
+
+on:
+  schedule:
+    - cron: &quot;0 */6 * * *&quot;
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: &quot;3.11&quot;
+      - run: python3 -m pip install -e .
+      - run: python3 -m libwatch
+      - uses: actions/upload-artifact@v4
+        with:
+          name: site
+          path: site/
+</code></pre>
+<p><code>watchlist.yml</code> は spec の形で、公開されている実在のフィードを 1 対象以上書く（Actions が空設定で失敗しないため）。例:</p>
+<pre><code class="language-yaml">targets:
+  - name: Python
+    blog: https://blog.python.org/feeds/posts/default?alt=rss
+    releases: https://github.com/python/cpython/releases
+</code></pre>
+<ul>
+<li>[ ] <strong>Step 4: テストを通す</strong></li>
+</ul>
+<pre><code class="language-bash">python3 -m pytest -q
+</code></pre>
+<ul>
+<li>[ ] <strong>Step 5: コミット</strong></li>
+</ul>
+<pre><code class="language-bash">git add .github/workflows/libwatch-build.yml watchlist.yml tests/test_workflow.py
+git commit -m &quot;$(cat &lt;&lt;'EOF'
+6時間ごとのビルド workflow と、公開フィードのサンプル設定を付ける。
+
+EOF
+)&quot;
+</code></pre>
+
+</main>
+</body>
+</html>

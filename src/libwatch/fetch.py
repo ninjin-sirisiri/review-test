@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import socket
 from collections.abc import Callable
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPErrorProcessor, HTTPRedirectHandler, Request, build_opener
@@ -50,6 +51,8 @@ def fetch_feed(
         except HTTPError as exc:
             raise FetchError(f"HTTP {exc.code}") from exc
         except URLError as exc:
+            if isinstance(exc.reason, (TimeoutError, socket.timeout)):
+                raise FetchError("timeout") from exc
             raise FetchError("connection failed") from exc
 
         with opened as resp:  # type: ignore[union-attr]

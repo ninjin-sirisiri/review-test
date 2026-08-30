@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="und">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src &#x27;none&#x27;; img-src &#x27;self&#x27; data:; style-src &#x27;self&#x27;; base-uri &#x27;none&#x27;; form-action &#x27;none&#x27;; frame-ancestors &#x27;none&#x27;">
+<title>ライブラリ更新ウォッチ</title>
+<link rel="stylesheet" href="../assets/sdd.css">
+</head>
+<body>
+<main>
+<h1>ライブラリ更新ウォッチ</h1>
+<p>読者ひとりが YAML の設定ファイルでウォッチ対象を持ち、公式ブログと GitHub Releases の更新を1本のタイムラインで見る静的サイト。用語はリポジトリ直下の <a href="../../../CONTEXT.md">CONTEXT.md</a> に従う。</p>
+<h2>Classification</h2>
+<p>architectural</p>
+<h2>Approach</h2>
+<p>設定ファイルを正本とし、ビルド時にフィードを取り込み、静的 HTML を出す。実行時サーバも DB も無い。開くたびに取り込むローカルサーバと、DB 付き常駐アプリは採らない。取り込み失敗時に前回の件を残さない。</p>
+<h2>Goals</h2>
+<ul>
+<li>読者ひとりが、YAML の設定ファイルでウォッチ対象と更新源を持つ。</li>
+<li>公式ブログ（RSS / Atom）と GitHub Releases の更新が、1本のタイムラインに新しい順で並ぶ。</li>
+<li>各件はタイトルと公式リンク、あれば要約。本文は公式側で読む。</li>
+<li>ビルドコマンドが静的 HTML を出す。読むのにアプリサーバは不要。</li>
+<li>実装は Python 3.11 以上。既定テストはネットワークに出ない。</li>
+</ul>
+<h2>Non-goals</h2>
+<ul>
+<li>公開ディレクトリ、カタログ、プリセット必須、更新源の自動推定。</li>
+<li>共有ウォッチリスト、ログイン、複数人編集。</li>
+<li>本文転載、本文からの要約、生成要約。</li>
+<li>ウォッチ対象ごとのページ、既読、コミットログ、ソーシャル投稿。</li>
+<li>ブログ HTML のスクレイプ、任意 URL、フィードの次ページ。</li>
+<li>取り込み失敗時に前回の件を残すこと。</li>
+<li>DB、常駐アプリ、非公開リポジトリ、認証付きフィード。</li>
+<li>GitHub Pages への自動公開、GitHub Enterprise、gist、github.io。</li>
+<li>画面からウォッチ対象を登録する UI。</li>
+</ul>
+<h2>Architecture</h2>
+<p>実行時サーバは無い。読むのはビルドが書いた静的ファイルだけである。</p>
+<pre><code class="language-text">watchlist.yml
+  → GitHub Releases URL を Releases フィード URL に揃える
+  → 更新源ごとにフィードを順に HTTP GET
+  → 正規化（タイトル・公式リンク・要約があれば・公開日時・ウォッチ対象・種類）
+  → 公開日時の新しい順にマージし、同じ公式リンクは1件にする
+  → site/index.html（と付属 CSS）
+</code></pre>
+<p>GitHub Releases の URL は、そのリポジトリの Releases フィードとして扱う。リリースページの HTML は取らない。認証ヘッダは付けない。公開日時の比較は UTC で行う。タイムゾーンが無い日時は UTC とみなす。</p>
+<h2>Components</h2>
+<ul>
+<li><strong>設定ファイル</strong>: リポジトリ直下の <code>watchlist.yml</code>（UTF-8）。ウォッチリストの正本。</li>
+<li><strong>URL 解決</strong>: GitHub Releases のページ URL・リポジトリ URL・<code>releases.atom</code> を <code>https://github.com/{owner}/{repo}/releases.atom</code> に揃える。</li>
+<li><strong>取り込み</strong>: 更新源ごとに GET し、RSS / Atom を読む。タイトル・公式リンク・要約（フィードの説明欄）・公開日時を抜く。</li>
+<li><strong>正規化とマージ</strong>: 件を「ウォッチ対象・種類・タイトル・リンク・要約・公開日時」にし、並べて重複を潰す。</li>
+<li><strong>静的ページ</strong>: タイムライン1画面。外部 JavaScript は使わない。</li>
+<li><strong>ビルドコマンド</strong>: リポジトリ直下で <code>python3 -m libwatch</code>。上記を順に実行する。</li>
+<li><strong>GitHub Actions</strong>: 任意。同じコマンドを 6 時間ごとに走らせ、<code>site/</code> を artifact にする。Pages 公開はこの spec の範囲外。</li>
+</ul>
+<h2>Config</h2>
+<p><code>watchlist.yml</code> の形:</p>
+<pre><code class="language-yaml">targets:
+  - name: React
+    blog: https://react.dev/rss.xml
+    releases: https://github.com/facebook/react/releases
+</code></pre>
+<ul>
+<li>トップレベルは <code>targets</code> のみ。未知のキーがあればビルド失敗。</li>
+<li><code>targets</code> はリスト。0 件ならビルド失敗。</li>
+<li>各要素の <code>name</code> は前後空白を除いたうえで空でない文字列。空ならビルド失敗。未知のキーがあればビルド失敗。表示・重複判定もこの除いた値を使う。</li>
+<li><code>blog</code> と <code>releases</code> はそれぞれ任意。どちらも無い、またはどちらも空ならビルド失敗。</li>
+<li><code>name</code> の重複はビルド失敗。</li>
+<li><code>blog</code> があるとき、値は <code>http://</code> または <code>https://</code> の絶対 URL でなければならない（フラグメントは無視してよい）。そうでなければビルド失敗。</li>
+<li><code>releases</code> があるとき、値は次節の GitHub Releases URL として解決できなければならない。できなければビルド失敗。</li>
+</ul>
+<h2>GitHub Releases URL</h2>
+<p>ホストは <code>github.com</code> のみ（大文字小文字は問わない）。スキームは <code>http</code> または <code>https</code>。クエリとフラグメントは無視する。パスは次のいずれか（末尾スラッシュはあってもよい）。</p>
+<ul>
+<li><code>/{owner}/{repo}</code></li>
+<li><code>/{owner}/{repo}/releases</code></li>
+<li><code>/{owner}/{repo}/releases.atom</code></li>
+</ul>
+<p><code>owner</code> と <code>repo</code> は <code>[A-Za-z0-9._-]+</code>。これ以外のパス（<code>/releases/tag/...</code>、<code>/tree/...</code>、Enterprise、gist など）は設定エラーでビルド失敗。解決後のフィード URL は常に <code>https://github.com/{owner}/{repo}/releases.atom</code>。</p>
+<h2>Data flow</h2>
+<ol>
+<li><code>watchlist.yml</code> を読む。</li>
+<li>各ウォッチ対象について、<code>blog</code> はその URL をフィードとして使う。<code>releases</code> は上の規則で Releases フィード URL にする。</li>
+<li>更新源を設定ファイルに書いた順（対象の順、各対象では <code>blog</code> があれば先、<code>releases</code> があれば次）で、<strong>順に</strong>取り込む。並列にしない。</li>
+<li>フィードは返ってきた件だけ使う。次ページ（<code>&lt;link rel=&quot;next&quot;&gt;</code> や API の pagination）は辿らない。件数上限は設けない。</li>
+<li>各件を正規化する。<ul>
+<li>公式リンクは item のリンクを、フィード URL を基準に絶対 URL にする。解決後が <code>http://</code> または <code>https://</code> でなければ、その件は落とす。</li>
+<li>要約は RSS <code>description</code> または Atom <code>summary</code> だけ。Atom <code>content</code> は使わない。本文を取りに行かない。空なら要約なし。切らない。</li>
+<li>タイトルが無い、または空白だけの件は落とす。</li>
+<li>公開日時が無い件は落とす。</li>
+</ul>
+</li>
+<li>全件を公開日時の新しい順に並べる。同じ日時ならウォッチ対象名、その次にタイトル。比較は Unicode コードポイント順（Python の文字列比較）。</li>
+<li>公式リンク文字列が同じ件は 1 件にする。残すのは公開日時が新しい方。同時なら種類がリリースノートの方。それも同じならウォッチ対象名が前の方、その次にタイトルが前の方。</li>
+<li><code>site/index.html</code> と付属 CSS を書き出す。同じビルドの <code>site/</code> 配下は揃ってから置き換える。<code>index.html</code> は一時ファイルに書いてからリネームする。</li>
+</ol>
+<h2>Page</h2>
+<ul>
+<li>1 画面。全ウォッチ対象の更新が上の順で並ぶ。</li>
+<li>各件は、タイトル（公式リンク先）、あれば要約、ウォッチ対象名、種類（「公式ブログ」または「リリースノート」）、公開日時（UTC、<code>YYYY-MM-DD HH:MM UTC</code>）を出す。</li>
+<li>タイトル・要約・ウォッチ対象名・種類は HTML として解釈しない。エスケープしたテキストとして出す。</li>
+<li>0 件のときは本文に「更新はまだない」と出す。</li>
+<li>失敗した更新源はページに出さない。</li>
+<li>外部 JS なし。CSS はビルドが <code>site/</code> に書く 1 ファイルまで。単一カラム。</li>
+</ul>
+<h2>Error handling</h2>
+<p><strong>設定</strong>（ビルド失敗、終了コード非ゼロ、<code>site/</code> は触らない）:</p>
+<ul>
+<li>ファイルが無い、UTF-8 で読めない、YAML として読めない。</li>
+<li>前節の Config / GitHub Releases URL に反する。</li>
+</ul>
+<p><strong>取り込み</strong>（その更新源だけスキップ。他は続ける。ビルドは成功してよい）:</p>
+<ul>
+<li>接続失敗、TLS 失敗、タイムアウト（更新源あたり 15 秒、接続と読み取りを含む）。</li>
+<li>HTTP ステータスが 200 以外。</li>
+<li>リダイレクトが 5 回を超える。</li>
+<li>本文が 2 MiB を超える（<code>Content-Length</code> が 2 MiB 超、または読み取り中に 2 MiB を超えた時点）。</li>
+<li>RSS / Atom として読めない。</li>
+</ul>
+<p>スキップした源は標準エラーへ 1 行ずつ出す。形式は <code>skip source: {name} {blog|releases} {url}: {reason}</code>。</p>
+<p>設定は正しいが源がすべてスキップされたら、ビルド成功、空のタイムライン（「更新はまだない」）。失敗した源の件は、その回のタイムラインに出ない。書き出しに成功したあとの <code>site/</code> は、今回のビルド結果だけになる。</p>
+<p><strong>件</strong>: タイトルまたは公式リンクが使えない件、公開日時が無い件は落とす。フィード 0 件はその源の成功・0 件。</p>
+<p><strong>書き出し</strong>: 一時ファイル経由で置き換える。途中失敗で壊れた <code>index.html</code> を残さない。設定エラーのときは既存の <code>site/</code> を変えない。</p>
+<h2>Numeric defaults</h2>
+<ul>
+<li>HTTP タイムアウト: 更新源あたり 15 秒。</li>
+<li>フィード取得サイズ上限: 2 MiB。</li>
+<li>リダイレクト: 最大 5 回。</li>
+<li>取り込み: 順次。並列度 1。</li>
+<li>GitHub Actions 間隔: 6 時間。</li>
+<li>User-Agent: <code>LibWatch/0.1</code>。</li>
+<li>要約: 切らない。</li>
+<li>フィード件数: フィードが返した件。こちらで上限なし。</li>
+<li>Python: 3.11 以上。</li>
+</ul>
+<h2>Consuming paths</h2>
+<ul>
+<li>読者は <code>watchlist.yml</code> を編集する。</li>
+<li>リポジトリ直下で <code>python3 -m libwatch</code> を実行する。</li>
+<li><code>site/index.html</code> をブラウザで開く。静的ファイルとしてどこに置いてもよい。</li>
+<li>定期実行は同じコマンドを cron に載せるか、付属の GitHub Actions を使う。Actions は無くても完成する。</li>
+<li>Actions を付ける場合: 6 時間ごとに <code>python3 -m libwatch</code> を走らせ、<code>site/</code> を artifact として残す。このジョブはネットワークに出てよい。</li>
+</ul>
+<h2>Testing</h2>
+<p>既定テストはネットワークに出ない。フィードと設定はフィクスチャ。HTTP はテストから差し込める。</p>
+<ul>
+<li>設定が無い・YAML として読めない・対象 0 件・対象名が空・更新源がゼロ・未知キー・不正 URL・GitHub Releases URL からリポジトリが取れない・<code>name</code> 重複 → ビルド失敗、<code>site/</code> 非更新。</li>
+<li>GitHub Releases のリポジトリ URL・<code>/releases</code>・<code>releases.atom</code>（末尾スラッシュありなし、ホストの大小、<code>http</code>）→ 同じ <code>https://github.com/{owner}/{repo}/releases.atom</code>。</li>
+<li>相対リンクは絶対 URL になる。<code>javascript:</code> などは件として落ちる。</li>
+<li>要約は RSS <code>description</code> または Atom <code>summary</code> だけ。Atom <code>content</code> は要約に使わない。タイトル・公式リンク・公開日時が無い件は落ちる。</li>
+<li>並びは公開日時の新しい順。同タイムはウォッチ対象名、その次にタイトル。</li>
+<li>同じ公式リンクは 1 件。同時ならリリースノートを残す。</li>
+<li>取り込み失敗はその源だけスキップし、他の件は残り、終了コード 0。標準エラーに skip 行が出る。ページに失敗源は出ない。</li>
+<li>源がすべてスキップされたら空のタイムラインで終了コード 0。</li>
+<li>HTML にタイトルと公式リンクがある。本文全体は出さない。テキストはエスケープする。</li>
+<li>空のときは「更新はまだない」。</li>
+<li>書き出し失敗のあと、壊れた HTML が残らない。</li>
+<li>既定テストランナーはネットワークに接続しない。</li>
+</ul>
+
+</main>
+</body>
+</html>

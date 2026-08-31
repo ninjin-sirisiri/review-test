@@ -50,6 +50,7 @@ def test_resolve_releases_feed_url(url: str, expected: str) -> None:
         "https://gist.github.com/foo/bar",
         "not-a-url",
         "https://github.com/facebook",
+        "https://[broken/foo/bar",
     ],
 )
 def test_resolve_releases_feed_url_rejects(url: str) -> None:

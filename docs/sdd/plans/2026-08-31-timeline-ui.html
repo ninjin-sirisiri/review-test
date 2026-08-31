@@ -1,0 +1,422 @@
+<!DOCTYPE html>
+<html lang="und">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src &#x27;none&#x27;; img-src &#x27;self&#x27; data:; style-src &#x27;self&#x27;; base-uri &#x27;none&#x27;; form-action &#x27;none&#x27;; frame-ancestors &#x27;none&#x27;">
+<title>文書としてのタイムライン Implementation Plan</title>
+<link rel="stylesheet" href="../assets/sdd.css">
+</head>
+<body>
+<main>
+<h1>文書としてのタイムライン Implementation Plan</h1>
+<p><strong>Goal:</strong> タイムライン1画面を、見出しの強さでスキャンできる静的な読み物として出す。</p>
+<p><strong>Architecture:</strong> 実行時サーバは無い。変えるのは <code>render_html</code> と <code>RENDER_CSS</code> だけ。取り込み・正規化・マージ・<code>write_site</code> は触らない。レンダラは渡された件を並べ替えず、Page の HTML とトークン付き CSS を返す。</p>
+<p><strong>Tech Stack:</strong> Python 3.11+、pytest、stdlib <code>html.escape</code>。新しい依存は足さない。テストは <code>uv run python -m pytest</code>。</p>
+<p><strong>Spec:</strong> docs/sdd/specs/2026-08-31-timeline-ui-design.md</p>
+<h2>Global Constraints</h2>
+<ul>
+<li>本文幅: <code>68ch</code></li>
+<li><code>body</code> 余白: 上下 <code>1.5rem</code>、左右 <code>1rem</code></li>
+<li><code>header</code> 下余白: <code>2.5rem</code>。下線の下パディング: <code>1rem</code></li>
+<li>件の間隔: <code>1.5rem</code>（マージンとパディング）</li>
+<li><code>h1</code>: <code>2.25rem</code> / 700</li>
+<li><code>h2</code>: <code>1.375rem</code> / 650</li>
+<li>本文: <code>1rem</code> / 400、行間 <code>1.55</code></li>
+<li>メタ: <code>0.875rem</code></li>
+<li><code>--muted</code>: CanvasText 62%</li>
+<li><code>--line</code>: CanvasText 50%</li>
+<li>CSS ファイル: 1。JS ファイル: 0</li>
+<li>コントラスト: テキスト 4.5:1、区切り線 3:1</li>
+<li>既定テストはネットワークに出ない。スクリーンショットは取らない。</li>
+<li>トークンは <code>:root</code> に置く。使わない変数は置かない。</li>
+<li><code>box-shadow</code> は CSS に出さない。グラデーションは使わない。<code>article</code> に背景色は付けない。</li>
+<li><code>script</code> 要素は出さない。<code>style.css</code> 以外の外部リソースは参照しない。</li>
+<li><code>h1</code> はページに1つ。各件のタイトルは <code>h2</code>。<code>h3</code> 以下は使わない。</li>
+<li>空メッセージは <code>main</code> 内の <code>p</code> に「更新はまだない」。</li>
+<li>レンダラは受け取った件を並べ替えない。</li>
+<li>アプリのファイルを増やさない。</li>
+<li>カード、影、グラデーション、大きなヒーロー。</li>
+<li>外部 JS、CSS の追加ファイル、複数カラム。</li>
+<li>対象や種類での絞り込み、日付グルーピング、対象別ページ。</li>
+<li>「更新はまだない」の文言変更、項目の追加・削除、日時形式の変更。</li>
+<li>独自のブランドカラー。システム色（Canvas / CanvasText / LinkText）以外は使わない。</li>
+<li>Web フォント。</li>
+<li><code>nav</code> / <code>footer</code> / <code>aside</code>、見出しの無い <code>section</code> で件を包むこと。</li>
+<li>取り込み・設定・マージ・書き出し処理の変更。</li>
+<li>新しいコマンドは無い。</li>
+</ul>
+<h2>File structure</h2>
+<table>
+<thead>
+<tr>
+  <th>Path</th>
+  <th>Responsibility</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+  <td><code>src/libwatch/render.py</code></td>
+  <td><code>render_html</code> と <code>RENDER_CSS</code>。この計画で変える唯一のアプリファイル</td>
+</tr>
+<tr>
+  <td><code>tests/test_render.py</code></td>
+  <td>ページ構造と CSS 文字列のテスト</td>
+</tr>
+<tr>
+  <td><code>src/libwatch/write.py</code></td>
+  <td>触らない</td>
+</tr>
+<tr>
+  <td><code>src/libwatch/build.py</code></td>
+  <td>触らない。今どおり <code>render_html</code> と <code>RENDER_CSS</code> を <code>site/</code> に渡す</td>
+</tr>
+</tbody>
+</table>
+<p>この表に無いアプリファイルを足さない。Node ツールチェーンを足さない。</p>
+<h2>Task 1: 文書タイムラインの HTML と CSS</h2>
+<p><strong>Files:</strong></p>
+<ul>
+<li>Modify: <code>tests/test_render.py</code></li>
+<li>Modify: <code>src/libwatch/render.py</code></li>
+</ul>
+<p><strong>Interfaces:</strong> 名前と引数は今のまま。</p>
+<ul>
+<li><code>render_html(entries: list[Entry]) -&gt; str</code></li>
+<li><code>RENDER_CSS: str</code></li>
+<li><code>KIND_LABELS</code> は今のまま（<code>blog</code> → <code>公式ブログ</code>、<code>releases</code> → <code>リリースノート</code>）</li>
+</ul>
+<p><code>render_html</code> が出す木:</p>
+<pre><code class="language-text">&lt;!DOCTYPE html&gt;
+&lt;html lang=&quot;ja&quot;&gt;
+head: charset、viewport（width=device-width, initial-scale=1）、title「ライブラリ更新ウォッチ」、href=&quot;style.css&quot;
+body
+  header
+    h1 ライブラリ更新ウォッチ
+  main
+    0件: &lt;p&gt;更新はまだない&lt;/p&gt;
+    1件以上: article
+      h2 &gt; a（公式リンク、タイトル）
+      要約があれば p
+      p.meta（対象名 · 種類 · YYYY-MM-DD HH:MM UTC）
+</code></pre>
+<p>タイトル・要約・対象名・種類・href は <code>html.escape(..., quote=True)</code>。<code>nav</code> / <code>footer</code> / <code>aside</code> / <code>script</code> / <code>h3</code> は出さない。<code>style.css</code> 以外の外部リソースは参照しない。</p>
+<p><code>RENDER_CSS</code> は次の文字列（これ以外の変数・<code>box-shadow</code>・<code>text-decoration: none</code>・グラデーション・<code>article</code> の背景色は置かない）:</p>
+<pre><code class="language-css">:root {
+  color-scheme: light dark;
+  --text: CanvasText;
+  --bg: Canvas;
+  --muted: color-mix(in oklab, CanvasText 62%, Canvas);
+  --line: color-mix(in oklab, CanvasText 50%, Canvas);
+  --accent: LinkText;
+}
+
+body {
+  max-width: 68ch;
+  margin: 0 auto;
+  padding: 1.5rem 1rem;
+  font-family: system-ui, sans-serif;
+  font-size: 1rem;
+  font-weight: 400;
+  line-height: 1.55;
+  color: var(--text);
+  background: var(--bg);
+}
+
+body &gt; header {
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 1rem;
+  margin-bottom: 2.5rem;
+}
+
+h1 {
+  font-size: 2.25rem;
+  font-weight: 700;
+  line-height: 1.2;
+  margin: 0;
+}
+
+article + article {
+  margin-top: 1.5rem;
+  padding-top: 1.5rem;
+  border-top: 1px solid var(--line);
+}
+
+article h2 {
+  font-size: 1.375rem;
+  font-weight: 650;
+  line-height: 1.2;
+  margin: 0 0 0.4em;
+}
+
+h2 a {
+  color: var(--accent);
+}
+
+p.meta {
+  font-size: 0.875rem;
+  font-weight: 400;
+  color: var(--muted);
+}
+</code></pre>
+<ul>
+<li>[ ] <strong>Step 1: 失敗するテスト</strong></li>
+</ul>
+<p><code>tests/test_render.py</code> を次の内容にする。既存のエスケープ・日時・種類・公式リンクのテストは残す。<code>RENDER_CSS</code> を import する。</p>
+<pre><code class="language-python">from datetime import datetime, timezone
+
+from libwatch.feed import Entry
+from libwatch.render import RENDER_CSS, render_html
+
+
+def _entry(
+    *,
+    title: str = &quot;Title&quot;,
+    link: str = &quot;https://example.com/item&quot;,
+    summary: str | None = &quot;Summary&quot;,
+    target_name: str = &quot;Lib&quot;,
+    kind: str = &quot;blog&quot;,
+    published: datetime | None = None,
+) -&gt; Entry:
+    return Entry(
+        target_name=target_name,
+        kind=kind,  # type: ignore[arg-type]
+        title=title,
+        link=link,
+        summary=summary,
+        published=published
+        or datetime(2026, 1, 2, 15, 4, 5, tzinfo=timezone.utc),
+    )
+
+
+def test_summary_script_is_escaped() -&gt; None:
+    html = render_html([_entry(summary=&quot;&lt;script&gt;alert(1)&lt;/script&gt;&quot;)])
+    assert &quot;&lt;script&gt;&quot; not in html
+    assert &quot;&amp;lt;script&amp;gt;&quot; in html
+
+
+def test_zero_entries_shows_empty_message() -&gt; None:
+    html = render_html([])
+    assert &quot;更新はまだない&quot; in html
+    assert &quot;&lt;!DOCTYPE html&gt;&quot; in html
+    assert 'lang=&quot;ja&quot;' in html
+    assert &quot;&lt;title&gt;ライブラリ更新ウォッチ&lt;/title&gt;&quot; in html
+    assert html.count('href=&quot;style.css&quot;') == 1
+    assert &quot;&lt;script&quot; not in html
+    assert &quot;&lt;article&gt;&quot; not in html
+    header_start = html.index(&quot;&lt;header&gt;&quot;)
+    header_end = html.index(&quot;&lt;/header&gt;&quot;)
+    h1 = &quot;&lt;h1&gt;ライブラリ更新ウォッチ&lt;/h1&gt;&quot;
+    assert header_start &lt; html.index(h1) &lt; header_end
+    main = html[html.index(&quot;&lt;main&gt;&quot;) : html.index(&quot;&lt;/main&gt;&quot;)]
+    assert &quot;&lt;p&gt;更新はまだない&lt;/p&gt;&quot; in main
+    assert 'name=&quot;viewport&quot;' in html
+    assert &quot;width=device-width&quot; in html
+    assert &quot;initial-scale=1&quot; in html
+
+
+def test_entry_title_is_official_link() -&gt; None:
+    html = render_html(
+        [_entry(title=&quot;Rss Title&quot;, link=&quot;https://example.com/rss-item&quot;)]
+    )
+    assert 'href=&quot;https://example.com/rss-item&quot;' in html
+    assert &quot;&gt;Rss Title&lt;/a&gt;&quot; in html
+    assert '&lt;h2&gt;&lt;a href=&quot;https://example.com/rss-item&quot;&gt;Rss Title&lt;/a&gt;&lt;/h2&gt;' in html
+    assert &quot;&lt;article&gt;&quot; in html
+    header_start = html.index(&quot;&lt;header&gt;&quot;)
+    header_end = html.index(&quot;&lt;/header&gt;&quot;)
+    assert header_start &lt; html.index(&quot;&lt;h1&gt;ライブラリ更新ウォッチ&lt;/h1&gt;&quot;) &lt; header_end
+    assert &quot;&lt;main&gt;&quot; in html
+
+
+def test_datetime_format_minutes_utc() -&gt; None:
+    html = render_html(
+        [
+            _entry(
+                published=datetime(2026, 1, 2, 15, 4, 5, tzinfo=timezone.utc),
+            )
+        ]
+    )
+    assert &quot;2026-01-02 15:04 UTC&quot; in html
+    assert &quot;15:04:05&quot; not in html
+
+
+def test_kind_labels() -&gt; None:
+    blog_html = render_html([_entry(kind=&quot;blog&quot;)])
+    releases_html = render_html([_entry(kind=&quot;releases&quot;)])
+    assert &quot;公式ブログ&quot; in blog_html
+    assert &quot;リリースノート&quot; in releases_html
+
+
+def test_two_entries_are_articles_with_h2_links() -&gt; None:
+    html = render_html(
+        [
+            _entry(title=&quot;First&quot;, link=&quot;https://example.com/a&quot;),
+            _entry(title=&quot;Second&quot;, link=&quot;https://example.com/b&quot;),
+        ]
+    )
+    assert html.count(&quot;&lt;article&gt;&quot;) == 2
+    assert '&lt;h2&gt;&lt;a href=&quot;https://example.com/a&quot;&gt;First&lt;/a&gt;&lt;/h2&gt;' in html
+    assert '&lt;h2&gt;&lt;a href=&quot;https://example.com/b&quot;&gt;Second&lt;/a&gt;&lt;/h2&gt;' in html
+    assert &quot;&lt;h3&quot; not in html
+    assert &quot;&lt;nav&quot; not in html
+    assert &quot;&lt;footer&quot; not in html
+    assert &quot;&lt;aside&quot; not in html
+
+
+def test_render_css_document_tokens() -&gt; None:
+    assert &quot;color-scheme: light dark&quot; in RENDER_CSS
+    assert &quot;68ch&quot; in RENDER_CSS
+    assert &quot;box-shadow&quot; not in RENDER_CSS
+    assert &quot;text-decoration: none&quot; not in RENDER_CSS
+    assert &quot;:root&quot; in RENDER_CSS
+    assert &quot;CanvasText&quot; in RENDER_CSS
+    assert &quot;50%&quot; in RENDER_CSS
+    assert &quot;62%&quot; in RENDER_CSS
+</code></pre>
+<ul>
+<li>[ ] <strong>Step 2: 失敗を確認</strong></li>
+</ul>
+<pre><code class="language-bash">uv run python -m pytest tests/test_render.py -q
+</code></pre>
+<p><code>test_zero_entries_shows_empty_message</code> と <code>test_entry_title_is_official_link</code> と新規テストが失敗する。エスケープ・日時・種類は今の HTML でも通ってよい。</p>
+<ul>
+<li>[ ] <strong>Step 3: 実装</strong></li>
+</ul>
+<p><code>src/libwatch/render.py</code> を次にする。<code>write.py</code> と <code>build.py</code> は編集しない。</p>
+<pre><code class="language-python">from __future__ import annotations
+
+import html
+from datetime import timezone
+
+from libwatch.feed import Entry
+
+KIND_LABELS = {
+    &quot;blog&quot;: &quot;公式ブログ&quot;,
+    &quot;releases&quot;: &quot;リリースノート&quot;,
+}
+
+RENDER_CSS = &quot;&quot;&quot;\
+:root {
+  color-scheme: light dark;
+  --text: CanvasText;
+  --bg: Canvas;
+  --muted: color-mix(in oklab, CanvasText 62%, Canvas);
+  --line: color-mix(in oklab, CanvasText 50%, Canvas);
+  --accent: LinkText;
+}
+
+body {
+  max-width: 68ch;
+  margin: 0 auto;
+  padding: 1.5rem 1rem;
+  font-family: system-ui, sans-serif;
+  font-size: 1rem;
+  font-weight: 400;
+  line-height: 1.55;
+  color: var(--text);
+  background: var(--bg);
+}
+
+body &gt; header {
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 1rem;
+  margin-bottom: 2.5rem;
+}
+
+h1 {
+  font-size: 2.25rem;
+  font-weight: 700;
+  line-height: 1.2;
+  margin: 0;
+}
+
+article + article {
+  margin-top: 1.5rem;
+  padding-top: 1.5rem;
+  border-top: 1px solid var(--line);
+}
+
+article h2 {
+  font-size: 1.375rem;
+  font-weight: 650;
+  line-height: 1.2;
+  margin: 0 0 0.4em;
+}
+
+h2 a {
+  color: var(--accent);
+}
+
+p.meta {
+  font-size: 0.875rem;
+  font-weight: 400;
+  color: var(--muted);
+}
+&quot;&quot;&quot;
+
+
+def render_html(entries: list[Entry]) -&gt; str:
+    parts: list[str] = [
+        &quot;&lt;!DOCTYPE html&gt;&quot;,
+        '&lt;html lang=&quot;ja&quot;&gt;',
+        &quot;&lt;head&gt;&quot;,
+        '&lt;meta charset=&quot;utf-8&quot;&gt;',
+        '&lt;meta name=&quot;viewport&quot; content=&quot;width=device-width, initial-scale=1&quot;&gt;',
+        &quot;&lt;title&gt;ライブラリ更新ウォッチ&lt;/title&gt;&quot;,
+        '&lt;link rel=&quot;stylesheet&quot; href=&quot;style.css&quot;&gt;',
+        &quot;&lt;/head&gt;&quot;,
+        &quot;&lt;body&gt;&quot;,
+        &quot;&lt;header&gt;&quot;,
+        &quot;&lt;h1&gt;ライブラリ更新ウォッチ&lt;/h1&gt;&quot;,
+        &quot;&lt;/header&gt;&quot;,
+        &quot;&lt;main&gt;&quot;,
+    ]
+    if not entries:
+        parts.append(&quot;&lt;p&gt;更新はまだない&lt;/p&gt;&quot;)
+    else:
+        for entry in entries:
+            parts.append(_render_entry(entry))
+    parts.extend([&quot;&lt;/main&gt;&quot;, &quot;&lt;/body&gt;&quot;, &quot;&lt;/html&gt;&quot;, &quot;&quot;])
+    return &quot;\n&quot;.join(parts)
+
+
+def _render_entry(entry: Entry) -&gt; str:
+    title = html.escape(entry.title, quote=True)
+    href = html.escape(entry.link, quote=True)
+    target = html.escape(entry.target_name, quote=True)
+    kind = html.escape(KIND_LABELS[entry.kind], quote=True)
+    published = entry.published.astimezone(timezone.utc).strftime(
+        &quot;%Y-%m-%d %H:%M UTC&quot;
+    )
+    lines = [
+        &quot;&lt;article&gt;&quot;,
+        f'&lt;h2&gt;&lt;a href=&quot;{href}&quot;&gt;{title}&lt;/a&gt;&lt;/h2&gt;',
+    ]
+    if entry.summary is not None:
+        lines.append(f&quot;&lt;p&gt;{html.escape(entry.summary, quote=True)}&lt;/p&gt;&quot;)
+    lines.append(
+        f'&lt;p class=&quot;meta&quot;&gt;{target} · {kind} · {published}&lt;/p&gt;'
+    )
+    lines.append(&quot;&lt;/article&gt;&quot;)
+    return &quot;\n&quot;.join(lines)
+</code></pre>
+<ul>
+<li>[ ] <strong>Step 4: テストを通す</strong></li>
+</ul>
+<pre><code class="language-bash">uv run python -m pytest -q
+</code></pre>
+<p>全テストがネットワーク無しで緑。</p>
+<ul>
+<li>[ ] <strong>Step 5: コミット</strong></li>
+</ul>
+<pre><code class="language-bash">git add src/libwatch/render.py tests/test_render.py
+git commit -m &quot;$(cat &lt;&lt;'EOF'
+タイムラインを見出しでスキャンできる文書にする。
+
+EOF
+)&quot;
+</code></pre>
+
+</main>
+</body>
+</html>

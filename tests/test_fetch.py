@@ -51,6 +51,19 @@ def test_timeout() -> None:
     assert exc.value.reason == "timeout"
 
 
+def test_body_read_timeout() -> None:
+    class TimeoutResp(FakeResp):
+        def read(self, n: int = -1) -> bytes:
+            raise TimeoutError
+
+    def urlopen(req: Request, timeout: float | None = None) -> TimeoutResp:
+        return TimeoutResp(b"ignored")
+
+    with pytest.raises(FetchError) as exc:
+        fetch_feed("https://example.com/feed.xml", urlopen=urlopen)
+    assert exc.value.reason == "timeout"
+
+
 def test_urlerror_timeout_reason() -> None:
     def urlopen(req: Request, timeout: float | None = None) -> FakeResp:
         raise URLError(TimeoutError())
@@ -95,6 +108,36 @@ def test_redirects_then_ok() -> None:
     body = fetch_feed("https://example.com/start", urlopen=urlopen)
     assert body == b"<rss/>"
     assert len(calls) == 6
+
+
+def test_relative_redirect() -> None:
+    calls: list[str] = []
+
+    def urlopen(req: Request, timeout: float | None = None) -> FakeResp:
+        calls.append(req.full_url)
+        if req.full_url == "https://example.com/start":
+            return FakeResp(
+                b"",
+                status=302,
+                headers={"Location": "/feeds/latest.xml"},
+            )
+        return FakeResp(b"<rss/>", status=200)
+
+    body = fetch_feed("https://example.com/start", urlopen=urlopen)
+    assert body == b"<rss/>"
+    assert calls == [
+        "https://example.com/start",
+        "https://example.com/feeds/latest.xml",
+    ]
+
+
+def test_redirect_without_location() -> None:
+    def urlopen(req: Request, timeout: float | None = None) -> FakeResp:
+        return FakeResp(b"", status=302)
+
+    with pytest.raises(FetchError) as exc:
+        fetch_feed("https://example.com/start", urlopen=urlopen)
+    assert exc.value.reason == "connection failed"
 
 
 def test_too_many_redirects() -> None:

@@ -78,3 +78,33 @@ def test_not_a_feed() -> None:
             target_name="Lib",
             kind="blog",
         )
+
+
+def test_unknown_xml_encoding() -> None:
+    body = (
+        b"<?xml version='1.0' encoding='no-such-codec'?>"
+        b"<rss version='2.0'><channel/></rss>"
+    )
+    with pytest.raises(FeedError):
+        parse_feed(
+            body,
+            feed_url="https://example.com/feed.xml",
+            target_name="Lib",
+            kind="blog",
+        )
+
+
+def test_rss_not_version_2() -> None:
+    body = (
+        b'<?xml version="1.0"?><rss version="0.91"><channel><item>'
+        b"<title>Old</title><link>https://example.com/old</link>"
+        b"<pubDate>Fri, 02 Jan 2026 15:04:05 GMT</pubDate>"
+        b"</item></channel></rss>"
+    )
+    with pytest.raises(FeedError):
+        parse_feed(
+            body,
+            feed_url="https://example.com/feed.xml",
+            target_name="Lib",
+            kind="blog",
+        )

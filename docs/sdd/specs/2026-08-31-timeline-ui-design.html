@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="und">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src &#x27;none&#x27;; img-src &#x27;self&#x27; data:; style-src &#x27;self&#x27;; base-uri &#x27;none&#x27;; form-action &#x27;none&#x27;; frame-ancestors &#x27;none&#x27;">
+<title>文書としてのタイムライン</title>
+<link rel="stylesheet" href="../assets/sdd.css">
+</head>
+<body>
+<main>
+<h1>文書としてのタイムライン</h1>
+<p>タイムライン1画面を、見出しの強さでスキャンできる静的な読み物にする。用語はリポジトリ直下の <a href="../../../CONTEXT.md">CONTEXT.md</a> に従う。取り込み・設定・マージは <a href="./2026-08-30-libwatch-design.md">2026-08-30-libwatch-design.md</a> のまま。このファイルは、その仕様の Page（タイムライン HTML と付属 CSS）を置き換える。衝突したら、マークアップと見た目はこのファイル、それ以外は親仕様。</p>
+<h2>Classification</h2>
+<p>architectural</p>
+<h2>Approach</h2>
+<p>文書としてのタイムライン。ページ見出しとランドマークを足し、各件のタイトルを見出しにする。余白・字・本文幅を段階で揃え、カードや影は使わない。OS のライト/ダークに追従する。カード型フィードと高密度リストは採らない。</p>
+<h2>Goals</h2>
+<ul>
+<li>開いて数秒で、「ページ見出し」と「更新の並び」が目で分かれる。</li>
+<li>見出しの強さが順位どおりになる。ページタイトル &gt; 件のタイトル &gt; 要約 &gt; メタ（ウォッチ対象名・種類・日時）。</li>
+<li>本文幅を読みやすい長さに抑え、余白と字サイズは段階で揃える。</li>
+<li>文字はコントラスト 4.5:1 以上、区切り線は 3:1 以上。ライト/ダークは OS に追従する。</li>
+<li>既存の読む単位は変えない。1本の時系列、同じ項目、公式リンク先はタイトルのまま。</li>
+</ul>
+<h2>Non-goals</h2>
+<ul>
+<li>カード、影、グラデーション、大きなヒーロー。</li>
+<li>外部 JS、CSS の追加ファイル、複数カラム。</li>
+<li>対象や種類での絞り込み、日付グルーピング、対象別ページ。</li>
+<li>「更新はまだない」の文言変更、項目の追加・削除、日時形式の変更。</li>
+<li>独自のブランドカラー。システム色（Canvas / CanvasText / LinkText）以外は使わない。</li>
+<li>Web フォント。</li>
+<li><code>nav</code> / <code>footer</code> / <code>aside</code>、見出しの無い <code>section</code> で件を包むこと。</li>
+<li>取り込み・設定・マージ・書き出し処理の変更。</li>
+</ul>
+<h2>Architecture</h2>
+<p>実行時サーバは無い。読むのはビルドが書いた静的ファイルだけである。この変更はレンダラだけに閉じる。</p>
+<pre><code class="language-text">watchlist.yml
+  → 取り込み・正規化・マージ（親仕様のまま）
+  → render_html / RENDER_CSS（この仕様の HTML と CSS）
+  → site/index.html と site/style.css
+</code></pre>
+<p>件の項目・並び・重複排除はレンダラに入る前に終わる。レンダラは受け取った件を並べ替えない。外部 JS は出さない。CSS はビルドが <code>site/style.css</code> に書く 1 ファイルだけ。単一カラム。</p>
+<h2>Components</h2>
+<ul>
+<li><strong><code>render_html</code></strong>: 次節のページ構造の HTML 文字列を返す。実装は <code>src/libwatch/render.py</code>。</li>
+<li><strong><code>RENDER_CSS</code></strong>: 見た目の規則の CSS 文字列。同じモジュール。ビルドが <code>site/style.css</code> に書く。</li>
+<li><strong><code>write_site</code> / <code>build</code></strong>: 今どおり <code>render_html</code> の結果と <code>RENDER_CSS</code> を <code>site/</code> に書く。ロジックは変えない。</li>
+</ul>
+<p>アプリのファイルを増やさない。</p>
+<h2>Page</h2>
+<pre><code class="language-text">html lang=&quot;ja&quot;
+  head
+    meta charset=&quot;utf-8&quot;
+    meta name=&quot;viewport&quot; content=&quot;width=device-width, initial-scale=1&quot;
+    title: ライブラリ更新ウォッチ
+    link rel=&quot;stylesheet&quot; href=&quot;style.css&quot;
+  body
+    header
+      h1: ライブラリ更新ウォッチ
+    main
+      0件: p「更新はまだない」
+      1件以上: article（親仕様と同じ並び）
+        h2 &gt; a（href は公式リンク、テキストはタイトル）
+        要約があれば p（要約テキスト）
+        p.meta（ウォッチ対象名 · 種類 · 公開日時）
+</code></pre>
+<ul>
+<li><code>h1</code> はページに1つ。各件のタイトルは <code>h2</code>。<code>h3</code> 以下は使わない。</li>
+<li>0件でも <code>header</code> と <code>h1</code> は出す。<code>article</code> は出さない。空メッセージは <code>main</code> 内の <code>p</code> に「更新はまだない」。</li>
+<li>各件の出す項目は親仕様と同じ。タイトル（公式リンク先）、あれば要約、ウォッチ対象名、種類（「公式ブログ」または「リリースノート」）、公開日時（UTC、<code>YYYY-MM-DD HH:MM UTC</code>）。</li>
+<li>タイトル・要約・ウォッチ対象名・種類は HTML として解釈しない。<code>html.escape(..., quote=True)</code> したテキストとして出す。<code>href</code> もエスケープする。</li>
+<li>失敗した更新源はページに出さない。</li>
+<li><code>script</code> 要素は出さない。<code>style.css</code> 以外の外部リソースは参照しない。</li>
+</ul>
+<h2>Visual</h2>
+<p>トークンは <code>:root</code> に置く。使わない変数は置かない。</p>
+<pre><code class="language-css">color-scheme: light dark;
+--text: CanvasText;
+--bg: Canvas;
+--muted: color-mix(in oklab, CanvasText 62%, Canvas);
+--line: color-mix(in oklab, CanvasText 50%, Canvas);
+--accent: LinkText;
+</code></pre>
+<p><code>--line</code> を 50% にするのは、区切り線のコントラスト 3:1 を満たすため。本文・見出し・リンクは 4.5:1 以上。<code>--muted</code> のメタも 4.5:1 以上。</p>
+<table>
+<thead>
+<tr>
+  <th>対象</th>
+  <th>規則</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+  <td><code>body</code></td>
+  <td><code>max-width: 68ch</code>。左右中央。<code>padding: 1.5rem 1rem</code>。<code>font-family: system-ui, sans-serif</code>。本文色 <code>--text</code>、背景 <code>--bg</code>。字 <code>1rem</code> / 400、行間 <code>1.55</code></td>
+</tr>
+<tr>
+  <td><code>body &gt; header</code></td>
+  <td>下線 <code>1px solid var(--line)</code>。<code>padding-bottom: 1rem</code>。<code>margin-bottom: 2.5rem</code></td>
+</tr>
+<tr>
+  <td><code>h1</code></td>
+  <td><code>2.25rem</code> / 700、行間 <code>1.2</code>。上マージン 0</td>
+</tr>
+<tr>
+  <td><code>article h2</code></td>
+  <td><code>1.375rem</code> / 650、行間 <code>1.2</code>。<code>margin: 0 0 0.4em</code>。件が多いので章見出しより一段小さくする。<code>h1</code> より小さく、本文より大きい</td>
+</tr>
+<tr>
+  <td><code>h2 a</code></td>
+  <td>色 <code>--accent</code>。下線を残す（<code>text-decoration: none</code> にしない）</td>
+</tr>
+<tr>
+  <td>要約の <code>p</code>、空メッセージの <code>p</code></td>
+  <td>本文と同じ色・サイズ。空メッセージは薄くしない</td>
+</tr>
+<tr>
+  <td><code>p.meta</code></td>
+  <td><code>0.875rem</code> / 400。色 <code>--muted</code></td>
+</tr>
+<tr>
+  <td><code>article + article</code></td>
+  <td><code>margin-top: 1.5rem</code>。<code>padding-top: 1.5rem</code>。<code>border-top: 1px solid var(--line)</code>。枠・影・カード背景は付けない</td>
+</tr>
+</tbody>
+</table>
+<p><code>box-shadow</code> は CSS に出さない。グラデーションは使わない。<code>article</code> に背景色は付けない。</p>
+<h2>Data flow</h2>
+<ol>
+<li>親仕様どおりウォッチリストを読み、取り込み、正規化し、マージする。</li>
+<li><code>render_html</code> がマージ結果を受け取り、Page の HTML を返す。0件なら空メッセージのページ。</li>
+<li><code>RENDER_CSS</code> を <code>style.css</code> として、HTML と揃えて <code>site/</code> に書く（親仕様の書き出し）。</li>
+</ol>
+<p>並べ順・重複排除・件の落とし方は親仕様。このレンダラはそれを変えない。</p>
+<h2>Error handling</h2>
+<p>新しい失敗はない。マージまで通れば HTML と CSS は必ず出る。0件は失敗ではなく、Page の空ページを書く。</p>
+<p>設定エラー・取り込みスキップ・書き出しのロールバックは親仕様のまま。ページに失敗した更新源は出さない。</p>
+<h2>Numeric defaults</h2>
+<ul>
+<li>本文幅: <code>68ch</code></li>
+<li><code>body</code> 余白: 上下 <code>1.5rem</code>、左右 <code>1rem</code></li>
+<li><code>header</code> 下余白: <code>2.5rem</code>。下線の下パディング: <code>1rem</code></li>
+<li>件の間隔: <code>1.5rem</code>（マージンとパディング）</li>
+<li><code>h1</code>: <code>2.25rem</code> / 700</li>
+<li><code>h2</code>: <code>1.375rem</code> / 650</li>
+<li>本文: <code>1rem</code> / 400、行間 <code>1.55</code></li>
+<li>メタ: <code>0.875rem</code></li>
+<li><code>--muted</code>: CanvasText 62%</li>
+<li><code>--line</code>: CanvasText 50%</li>
+<li>CSS ファイル: 1。JS ファイル: 0</li>
+<li>コントラスト: テキスト 4.5:1、区切り線 3:1</li>
+</ul>
+<h2>Consuming paths</h2>
+<ul>
+<li>読者は今までどおり <code>watchlist.yml</code> を編集し、リポジトリ直下で <code>python3 -m libwatch</code> を実行し、<code>site/index.html</code> をブラウザで開く。</li>
+<li>ローカル確認は README の開発サーバ手順のまま。新しいコマンドは無い。</li>
+<li>GitHub Actions の間隔と成果物は親仕様のまま。</li>
+</ul>
+<h2>Testing</h2>
+<p>既定テストはネットワークに出ない。スクリーンショットは取らない。対象は主に <code>tests/test_render.py</code>。</p>
+<p>残す:</p>
+<ul>
+<li>タイトルは公式リンク。要約・対象名・種類はエスケープする。<code>href</code> もエスケープする。</li>
+<li>日時は <code>YYYY-MM-DD HH:MM UTC</code>。種類は「公式ブログ」「リリースノート」。</li>
+<li>0件の本文に「更新はまだない」。<code>href=&quot;style.css&quot;</code> を1つ参照する。<code>script</code> は無い。</li>
+</ul>
+<p>足す:</p>
+<ul>
+<li><code>header</code> の中に <code>h1</code>（テキストは「ライブラリ更新ウォッチ」）と、<code>main</code> がある。</li>
+<li>各件は <code>article</code>。タイトルは <code>h2</code> &gt; <code>a</code>。</li>
+<li>0件でも <code>header</code> と <code>h1</code> はある。<code>article</code> は無い。空メッセージは <code>main</code> 内。</li>
+<li><code>name=&quot;viewport&quot;</code> があり、<code>content</code> に <code>width=device-width</code> と <code>initial-scale=1</code> を含む。</li>
+<li>CSS に <code>color-scheme: light dark</code> と <code>68ch</code> がある。<code>box-shadow</code> は無い。</li>
+</ul>
+
+</main>
+</body>
+</html>

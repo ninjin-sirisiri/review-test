@@ -15,12 +15,15 @@ class GitHubReleasesUrlError(ValueError):
 
 
 def resolve_releases_feed_url(url: str) -> str:
-    parsed = urlparse(url)
+    try:
+        parsed = urlparse(url)
+        hostname = (parsed.hostname or "").lower()
+    except ValueError as exc:
+        raise GitHubReleasesUrlError(f"invalid github releases url: {url!r}") from exc
     if parsed.scheme.lower() not in {"http", "https"}:
         raise GitHubReleasesUrlError(f"unsupported scheme: {url!r}")
     if parsed.username is not None or parsed.password is not None:
         raise GitHubReleasesUrlError(f"credentials not allowed: {url!r}")
-    hostname = (parsed.hostname or "").lower()
     if hostname != "github.com":
         raise GitHubReleasesUrlError(f"not github.com: {url!r}")
     match = _PATH.match(parsed.path or "")

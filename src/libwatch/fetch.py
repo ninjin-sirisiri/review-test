@@ -3,6 +3,7 @@ from __future__ import annotations
 import socket
 from collections.abc import Callable
 from urllib.error import HTTPError, URLError
+from urllib.parse import urljoin
 from urllib.request import HTTPErrorProcessor, HTTPRedirectHandler, Request, build_opener
 
 MAX_BYTES = 2 * 1024 * 1024
@@ -55,20 +56,26 @@ def fetch_feed(
                 raise FetchError("timeout") from exc
             raise FetchError("connection failed") from exc
 
-        with opened as resp:  # type: ignore[union-attr]
-            code = resp.getcode()
-            if code in REDIRECT_CODES:
-                if redirects >= MAX_REDIRECTS:
-                    raise FetchError("too many redirects")
-                current = resp.headers["Location"]
-                redirects += 1
-                continue
-            if code != 200:
-                raise FetchError(f"HTTP {code}")
-            content_length = resp.headers.get("Content-Length")
-            if content_length is not None and int(content_length) > MAX_BYTES:
-                raise FetchError("too large")
-            data = resp.read(MAX_BYTES + 1)
-            if len(data) > MAX_BYTES:
-                raise FetchError("too large")
-            return data
+        try:
+            with opened as resp:  # type: ignore[union-attr]
+                code = resp.getcode()
+                if code in REDIRECT_CODES:
+                    if redirects >= MAX_REDIRECTS:
+                        raise FetchError("too many redirects")
+                    location = resp.headers.get("Location")
+                    if not location:
+                        raise FetchError("connection failed")
+                    current = urljoin(current, location)
+                    redirects += 1
+                    continue
+                if code != 200:
+                    raise FetchError(f"HTTP {code}")
+                content_length = resp.headers.get("Content-Length")
+                if content_length is not None and int(content_length) > MAX_BYTES:
+                    raise FetchError("too large")
+                data = resp.read(MAX_BYTES + 1)
+                if len(data) > MAX_BYTES:
+                    raise FetchError("too large")
+                return data
+        except TimeoutError as exc:
+            raise FetchError("timeout") from exc

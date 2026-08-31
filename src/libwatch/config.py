@@ -103,10 +103,14 @@ def _optional_url_field(value: object, *, field: str) -> str | None:
 
 
 def _normalize_blog(url: str) -> str:
-    parsed = urlparse(url)
+    try:
+        parsed = urlparse(url)
+        hostname = parsed.hostname
+    except ValueError as exc:
+        raise ConfigError(f"blog URL must be absolute http(s): {url!r}") from exc
     if parsed.scheme not in {"http", "https"}:
         raise ConfigError(f"blog URL must be absolute http(s): {url!r}")
-    if not parsed.hostname:
+    if not hostname:
         raise ConfigError(f"blog URL must include a hostname: {url!r}")
     return urlunparse(
         (parsed.scheme, parsed.netloc, parsed.path, parsed.params, parsed.query, "")

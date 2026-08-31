@@ -11,19 +11,61 @@ KIND_LABELS = {
 }
 
 RENDER_CSS = """\
+:root {
+  color-scheme: light dark;
+  --text: CanvasText;
+  --bg: Canvas;
+  --muted: color-mix(in oklab, CanvasText 62%, Canvas);
+  --line: color-mix(in oklab, CanvasText 50%, Canvas);
+  --accent: LinkText;
+}
+
 body {
-  max-width: 40rem;
+  max-width: 68ch;
   margin: 0 auto;
   padding: 1.5rem 1rem;
   font-family: system-ui, sans-serif;
-  line-height: 1.5;
+  font-size: 1rem;
+  font-weight: 400;
+  line-height: 1.55;
+  color: var(--text);
+  background: var(--bg);
 }
-article {
-  margin-bottom: 1.5rem;
+
+body > header {
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 1rem;
+  margin-bottom: 2.5rem;
 }
-article .meta {
-  color: #444;
-  font-size: 0.9rem;
+
+h1 {
+  font-size: 2.25rem;
+  font-weight: 700;
+  line-height: 1.2;
+  margin: 0;
+}
+
+article + article {
+  margin-top: 1.5rem;
+  padding-top: 1.5rem;
+  border-top: 1px solid var(--line);
+}
+
+article h2 {
+  font-size: 1.375rem;
+  font-weight: 650;
+  line-height: 1.2;
+  margin: 0 0 0.4em;
+}
+
+h2 a {
+  color: var(--accent);
+}
+
+p.meta {
+  font-size: 0.875rem;
+  font-weight: 400;
+  color: var(--muted);
 }
 """
 
@@ -34,17 +76,22 @@ def render_html(entries: list[Entry]) -> str:
         '<html lang="ja">',
         "<head>",
         '<meta charset="utf-8">',
+        '<meta name="viewport" content="width=device-width, initial-scale=1">',
         "<title>ライブラリ更新ウォッチ</title>",
         '<link rel="stylesheet" href="style.css">',
         "</head>",
         "<body>",
+        "<header>",
+        "<h1>ライブラリ更新ウォッチ</h1>",
+        "</header>",
+        "<main>",
     ]
     if not entries:
-        parts.append("更新はまだない")
+        parts.append("<p>更新はまだない</p>")
     else:
         for entry in entries:
             parts.append(_render_entry(entry))
-    parts.extend(["</body>", "</html>", ""])
+    parts.extend(["</main>", "</body>", "</html>", ""])
     return "\n".join(parts)
 
 
@@ -58,7 +105,7 @@ def _render_entry(entry: Entry) -> str:
     )
     lines = [
         "<article>",
-        f'<a href="{href}">{title}</a>',
+        f'<h2><a href="{href}">{title}</a></h2>',
     ]
     if entry.summary is not None:
         lines.append(f"<p>{html.escape(entry.summary, quote=True)}</p>")

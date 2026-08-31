@@ -34,11 +34,13 @@ def parse_feed(
 ) -> list[Entry]:
     try:
         root = ET.fromstring(body)
-    except ET.ParseError as exc:
+    except (ET.ParseError, LookupError) as exc:
         raise FeedError("invalid XML") from exc
 
     tag = root.tag
     if tag == "rss":
+        if root.get("version") != "2.0":
+            raise FeedError("not an RSS 2.0 or Atom 1.0 feed")
         return _parse_rss(root, feed_url=feed_url, target_name=target_name, kind=kind)
     if tag == f"{ATOM}feed":
         return _parse_atom(root, feed_url=feed_url, target_name=target_name, kind=kind)

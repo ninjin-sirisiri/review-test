@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="und">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src &#x27;none&#x27;; img-src &#x27;self&#x27; data:; style-src &#x27;self&#x27;; base-uri &#x27;none&#x27;; form-action &#x27;none&#x27;; frame-ancestors &#x27;none&#x27;">
+<title>管理画面からのウォッチ対象の変更</title>
+<link rel="stylesheet" href="../assets/sdd.css">
+</head>
+<body>
+<header>
+<p>Spec</p>
+<nav aria-label="On this page">
+<ul>
+<li><a href="#classification">Classification</a></li>
+<li><a href="#approach">Approach</a></li>
+<li><a href="#goals">Goals</a></li>
+<li><a href="#non-goals">Non-goals</a></li>
+<li><a href="#architecture">Architecture</a></li>
+<li><a href="#components">Components</a></li>
+<li><a href="#config">Config</a></li>
+<li><a href="#data-flow">Data flow</a></li>
+<li><a href="#page">Page</a></li>
+<li><a href="#error-handling">Error handling</a></li>
+<li><a href="#numeric-defaults">Numeric defaults</a></li>
+<li><a href="#否定と順序">否定と順序</a></li>
+<li><a href="#consuming-paths">Consuming paths</a></li>
+<li><a href="#testing">Testing</a></li>
+<li><a href="#親仕様との衝突">親仕様との衝突</a></li>
+</ul>
+</nav>
+</header>
+<main>
+<h1 id="管理画面からのウォッチ対象の変更">管理画面からのウォッチ対象の変更</h1>
+<p>読者ひとりが、ローカルの管理画面からウォッチ対象を追加・編集・削除する。正本は設定ファイルのまま。用語はリポジトリ直下の <a href="../../../CONTEXT.md">CONTEXT.md</a> に従う。設定の形・取り込み・マージ・ビルド成果物のタイムラインは <a href="./2026-08-30-libwatch-design.md">2026-08-30-libwatch-design.md</a> のまま。タイムラインのマークアップと見た目は <a href="./2026-08-31-timeline-ui-design.md">2026-08-31-timeline-ui-design.md</a> のまま。待ち受けを localhost のプロセスに限る判断は <a href="../../adr/0001-localhost-watchlist-management.md">0001-localhost-watchlist-management.md</a>。</p>
+<section>
+<h2 id="classification">Classification</h2>
+<p>architectural</p>
+</section>
+<section>
+<h2 id="approach">Approach</h2>
+<p>設定ファイルを正本のまま残す。localhost の管理プロセスが管理画面を出し、YAML を正規化して書く。タイムラインの更新は今までのビルド。コピーした <code>site/</code> と GitHub Actions の成果物は読むだけ。</p>
+<p>画面や DB・ブラウザ保存を正本にする常駐アプリ化、保存のたびに取り込みまで走らせること、管理 UI を静的 <code>site/</code> に含めて公開面からも触れるようにすることは採らない。</p>
+<p>この spec が親仕様から置き換えるのは次だけである。</p>
+<ul>
+<li>non-goal「画面からウォッチ対象を登録する UI」→ 任意の管理画面を足す（必須にはしない）</li>
+<li>「実行時サーバは無い」→ 読む成果物にサーバは不要。管理とローカルプレビューだけ <code>serve</code> を使う</li>
+</ul>
+</section>
+<section>
+<h2 id="goals">Goals</h2>
+<ul>
+<li>読者が管理画面からウォッチ対象を追加・編集・削除できる。正本は設定ファイル。YAML 直接編集も残る。</li>
+<li>画面登録は必須にしない。最後の1件は削除できない。</li>
+<li>管理プロセスは <code>127.0.0.1</code> だけで、タイムライン（<code>site/</code>）と管理画面を出す。保存は YAML のみ。</li>
+<li>ビルド済みの読む画面は今のタイムライン仕様のまま。管理画面は <code>site/</code> に書かない。</li>
+<li>引数なしのビルドコマンドと、既定テストがネットワークに出ないことは変えない。</li>
+</ul>
+</section>
+<section>
+<h2 id="non-goals">Non-goals</h2>
+<ul>
+<li>公開サイトからの保存、ログイン、共有ウォッチリスト、DB。</li>
+<li>管理画面を静的成果物に含める、タイムライン上の登録 UI、読む画面から管理へのリンク。</li>
+<li>保存時の自動ビルド、更新源の自動推定、カタログ、プリセット必須。</li>
+<li>管理画面の script、並び替え UI、成功フラッシュ。</li>
+<li><code>localhost</code> ホスト名での案内・書き込み許可、<code>0.0.0.0</code> 待ち受け。</li>
+<li>壊れた YAML の画面からの修復、コメント保持。</li>
+<li>GitHub Actions での serve、Pages 公開。</li>
+</ul>
+</section>
+<section>
+<h2 id="architecture">Architecture</h2>
+<p>実行時サーバは読む成果物には無い。コピーした <code>site/</code> は今どおり静的ファイルだけで読める。ウォッチ対象を画面から変えるときと、ローカルでプレビューするときだけ、同じプロセスが待ち受ける。</p>
+<pre><code class="language-text">watchlist.yml（正本）
+  → python -m libwatch          既存の取り込み・マージ・site/ 書き出し
+  → site/index.html + style.css  タイムライン（親仕様のまま）
+
+watchlist.yml
+  ⇄ python -m libwatch serve     127.0.0.1 のみ
+       GET  /              site/index.html。無ければ未ビルド説明ページ
+       GET  /style.css     site/style.css（無ければ 404）
+       GET  /manage        管理画面（YAML を読む。site/ は見ない）
+       GET  /manage.css    管理用 CSS（site/ は見ない）
+       POST /manage        検証して YAML を正規化書き込み。ビルドしない
+</code></pre>
+<p><code>/manage</code> と <code>/manage.css</code> は予約パスで、<code>site/</code> より優先する。<code>/manage</code> と <code>/manage/</code> は同じである。</p>
+<p>待ち受けは <code>127.0.0.1</code>。既定ポートは 8000。<code>--port</code> で変更できる。使用中なら起動失敗。起動時に標準出力へ <code>http://127.0.0.1:{port}/</code> と <code>http://127.0.0.1:{port}/manage</code> を出す。<code>localhost</code> は案内しない。</p>
+<p>第一引数が無ければビルド。第一引数が <code>serve</code> なら管理プロセス。それ以外の第一引数は起動失敗。<code>--port</code> は serve 専用である。ビルドに付けると起動失敗。serve の未知引数も起動失敗。GitHub Actions はビルドだけ。</p>
+</section>
+<section>
+<h2 id="components">Components</h2>
+<ul>
+<li><strong>設定ファイル</strong>: リポジトリ直下の <code>watchlist.yml</code>。正本。形と検証は親仕様の Config のまま（1件以上、<code>name</code> 一意、<code>blog</code> と/または <code>releases</code>、未知キー禁止）。</li>
+<li><strong>ビルド</strong>: 既存の <code>python -m libwatch</code>。この spec では変えない。</li>
+<li><strong>管理プロセス</strong>: <code>python -m libwatch serve</code>。カレントディレクトリの <code>watchlist.yml</code> と <code>site/</code> を使う（ビルドと同じ）。</li>
+<li><strong>静的出し</strong>: <code>site/</code> 配下を GET で出す。予約パス以外。正規化後のパスが <code>site/</code> の外なら出さない。ディレクトリ一覧は出さない。</li>
+<li><strong>管理画面</strong>: プロセスだけが HTML を出す。script なし。追加フォームは常時。一覧は読むだけ。編集は <code>?edit={name}</code> でその1件のフォーム。削除確認は <code>?confirm_delete={name}</code> で確認専用表示。タイムライン <code>/</code> へのリンクはある。読む画面からこちらへのリンクは無い。</li>
+<li><strong>管理 CSS</strong>: プロセスが <code>/manage.css</code> で出す。トークンと制約はタイムライン仕様と同じ（システム色、単一カラム、カードなし、Web フォントなし、<code>color-scheme: light dark</code>、本文幅 <code>68ch</code>）。フォーム用の規則を足してよい。未ビルドの <code>/</code> もこれを参照する。</li>
+<li><strong>YAML 書き込み</strong>: 画面保存が成功したとき、ファイル全体を正規化して置き換える。コメント・元のキー順・引用符は残さない。無い任意キー（<code>blog</code> / <code>releases</code>）は出力しない。一時ファイル経由で置き換え、壊れた中間ファイルを残さない。</li>
+<li><strong>衝突検知</strong>: フォームに、読み込み時のファイル生バイトの SHA-256（小文字 hex）を <code>hash</code> として hidden で載せる。書き込み直前のディスク上の生バイトと違えば保存しない。</li>
+<li><strong>Origin 検査</strong>: 書き込み POST だけ。後述の規則。GET は検査しない。</li>
+</ul>
+<p>アプリ用の DB・外部 JS・追加の成果物ファイルは足さない。ビルドは管理 HTML を <code>site/</code> に書かない。</p>
+</section>
+<section>
+<h2 id="config">Config</h2>
+<p>親仕様の Config / GitHub Releases URL を変えない。画面からの追加・編集の検証も、書き込み後の YAML が同じ規則を満たすことである。</p>
+<p>画面が書き出す YAML の値は、親仕様が読み込み後に持つ値と同じである。<code>name</code> は前後空白を除いた値。<code>blog</code> があるときはフラグメントを除いた絶対 <code>http</code> / <code>https</code> URL。<code>releases</code> があるときは常に <code>https://github.com/{owner}/{repo}/releases.atom</code>。手で書いた <code>/releases</code> ページ URL は、画面保存後はこの atom URL になる。</p>
+<p>キー順は各件で <code>name</code>、あれば <code>blog</code>、あれば <code>releases</code>。トップレベルは <code>targets</code> のみ。UTF-8。追加はリスト末尾。改名は位置を変えない。</p>
+</section>
+<section>
+<h2 id="data-flow">Data flow</h2>
+<p>カレントディレクトリはビルドと同じ。設定ファイルは <code>watchlist.yml</code>、成果物は <code>site/</code>。</p>
+<h3 id="起動">起動</h3>
+<ol>
+<li><code>127.0.0.1:{port}</code> で待つ。既定 8000。<code>--port</code> は 1〜65535 の整数。取れなければ起動失敗（終了コード非ゼロ）。</li>
+<li>標準出力に次の2行を出す（このホスト名以外は出さない）。<ul>
+<li><code>http://127.0.0.1:{port}/</code></li>
+<li><code>http://127.0.0.1:{port}/manage</code></li>
+</ul>
+</li>
+<li>起動時にビルドしない。YAML の可否もここでは見ない。</li>
+</ol>
+<h3 id="読みget">読み（GET）</h3>
+<p>許可メソッドは GET と POST。それ以外は 405。YAML は触らない。</p>
+<p>予約パス（<code>site/</code> より先）:</p>
+<ul>
+<li><code>/manage.css</code> → プロセスの CSS。常に 200。</li>
+<li><code>/manage</code>（末尾スラッシュは同一）。クエリだけ見る。</li>
+</ul>
+<p>クエリ値は URL デコードしたあと、YAML 上の <code>name</code>（trim 済み）と照合する。href に載せるときは URL エンコードする。</p>
+<p><code>/manage</code> のクエリ:</p>
+<ul>
+<li><code>edit</code> と <code>confirm_delete</code> が両方ある、どちらかの値が空、該当する <code>name</code> が YAML に無い、<code>confirm_delete</code> が最後の1件 → <strong>一覧</strong>（追加フォームあり）とエラー。確認専用にも編集フォームにもしない。</li>
+<li><code>confirm_delete</code> だけが、2件以上ある既存の <code>name</code> → <strong>確認専用</strong>（一覧・追加・編集は出さない）。</li>
+<li><code>edit</code> だけが既存の <code>name</code> → 一覧 + 常時の追加フォーム + その1件の編集フォーム。</li>
+<li>クエリなし → 一覧 + 常時の追加フォーム。</li>
+</ul>
+<p>YAML が無い・UTF-8 でない・親仕様の Config に反する（0件を含む）ときは、上記にせず <strong>エラー表示だけ</strong>。フォームは出さない。</p>
+<p><code>/</code>:</p>
+<ul>
+<li><code>site/index.html</code> があれば、そのバイトを返す（親仕様の HTML。相対 <code>style.css</code> のまま）。管理へのリンクは足さない。</li>
+<li>無ければ 200 で未ビルド説明ページ。<code>/manage.css</code> を参照する。管理へのリンクは置かない。</li>
+</ul>
+<p><code>/style.css</code>: <code>site/style.css</code> があればそのバイト。無ければ 404。</p>
+<p>予約パス以外の GET は <code>site/</code> 配下のファイル。リクエストパスを正規化した結果が <code>site/</code> ディレクトリの外なら 404。ディレクトリ一覧は出さない。ファイルが無ければ 404。</p>
+<h3 id="書きpost-manage">書き（POST <code>/manage</code>）</h3>
+<p>POST の対象は <code>/manage</code> だけである。それ以外のパスへの POST は 405。YAML を触らない。</p>
+<ol>
+<li>Origin 検査。<code>Origin</code> ヘッダがある場合はその値だけを見る。値が <code>http://127.0.0.1:{port}</code> と一致するときだけ続ける（<code>{port}</code> は実際に待っているポート。スキーム・ホスト・ポート以外を含む値は不一致）。<code>Origin</code> が無ければ <code>Referer</code> からスキーム・ホスト・ポートだけを取り、同じ文字列と比較する。両方無い、一致しない、<code>localhost</code> や別ポート → YAML を触らず 403。本文の詳細は出さなくてよい。</li>
+<li>本文が 64 KiB を超える → YAML を触らず 400。</li>
+<li><code>Content-Type</code> のメディアタイプ（<code>;</code> より前、前後空白を除き小文字）が <code>application/x-www-form-urlencoded</code> でない → YAML を触らず 400。charset パラメータはあってよい。</li>
+<li>YAML が読めない（GET のエラー表示と同じ条件）→ YAML を触らず 200 でエラー表示だけ。フォームなし。</li>
+<li>読み込んだファイルの生バイトの SHA-256（小文字 hex）が、フォームの <code>hash</code> と一致しなければ、YAML を触らず 200 で管理画面（一覧+追加）と衝突エラー。<code>hash</code> が無いときも同じ。POST された name / blog / releases はフォームに戻さない。</li>
+<li><code>action</code> は <code>add</code> / <code>edit</code> / <code>delete</code> のどれか。それ以外・欠落は YAML を触らず 200 で一覧+追加とエラー。</li>
+</ol>
+<p>フィールドの空文字は、<code>blog</code> と <code>releases</code> では「その更新源は無し」である。<code>name</code> の空は検証失敗である。</p>
+<p><strong>add:</strong> <code>name</code>, <code>blog</code>, <code>releases</code>。末尾に1件足したリストを、親仕様の Config と同じ規則で検証する。失敗なら YAML を触らず 200。エラーと入力値を追加フォームに残す。一覧の他件は読むだけ。</p>
+<p><strong>edit:</strong> <code>original_name</code> が既存の <code>name</code>。同じ位置で <code>name</code> / <code>blog</code> / <code>releases</code> を置き換える（改名可）。検証は Config と同じ。失敗なら YAML を触らず 200。エラーと入力値を、その <code>original_name</code> の編集フォームに残す。<code>original_name</code> が YAML に無い → YAML を触らず 200、一覧+追加とエラー。編集フォームにはしない。入力値は戻さない。</p>
+<p><strong>delete:</strong> <code>name</code> が既存。残りが 0 件になるなら拒否（YAML を触らず 200、一覧+追加、エラー。確認専用にはしない）。<code>name</code> が無いときも同じ。それ以外はその件を除く。確認用 GET を経ていなくても、POST がこの規則を満たせば削除してよい。</p>
+<p>検証成功:</p>
+<ol start="7">
+<li>ファイル全体を正規化して書き、一時ファイル経由で置き換える。書き出し失敗なら既存ファイルを残し、200 でエラー。壊れた中間ファイルを残さない。</li>
+<li>成功なら <strong>303 See Other</strong>、<code>Location: /manage</code>（クエリなし、本文なし）。成功メッセージ用のクエリは付けない。</li>
+</ol>
+<p>失敗した書き込みのあと、次の GET はディスク上の現在のバイトを正とする。</p>
+</section>
+<section>
+<h2 id="page">Page</h2>
+<p>未ビルドの <code>/</code>:</p>
+<pre><code class="language-text">html lang=&quot;ja&quot;
+  head: charset, viewport, title「ライブラリ更新ウォッチ」, link href=&quot;/manage.css&quot;
+  header &gt; h1「ライブラリ更新ウォッチ」
+  main &gt; p「タイムラインはまだビルドされていない」
+</code></pre>
+<p><code>script</code> なし。管理へのリンクなし。このページはエラーではなく、200 である。「更新はまだない」は使わない。</p>
+<p>管理画面（YAML が読めたとき）:</p>
+<pre><code class="language-text">html lang=&quot;ja&quot;
+  head: charset, viewport, title「ウォッチ対象」, link href=&quot;/manage.css&quot;
+  header
+    h1「ウォッチ対象」
+    a href=&quot;/&quot;「タイムライン」
+  main
+    エラーがあれば p
+    確認専用でなければ 追加フォーム POST /manage
+      hidden action=add, hash
+      name, blog, releases
+    確認専用でなければ 各ウォッチ対象（YAML 順）
+      編集中の1件: 編集フォーム POST /manage
+        hidden action=edit, hash, original_name
+        name, blog, releases
+        a「キャンセル」href=&quot;/manage&quot;
+      それ以外: 表示 + a「編集」href=&quot;/manage?edit={urlencoded name}&quot;
+        2件以上なら a「削除」href=&quot;/manage?confirm_delete={urlencoded name}&quot;
+    確認専用:
+      p「{name} を削除しますか」
+      form POST /manage: hidden action=delete, hash, name
+      a「キャンセル」href=&quot;/manage&quot;
+</code></pre>
+<p>ラベルは用語どおり（公式ブログ、リリースノート）。タイトル・名前・URL・エラーは HTML として解釈せずエスケープする。<code>hash</code> は当該 GET で読んだファイル生バイトの SHA-256 hex。1件のときは削除リンクを出さない。キャンセルは <code>GET /manage</code>（クエリなし）。確認専用のあいだは一覧・追加・編集フォームを出さない。</p>
+<p>YAML が読めないときの <code>/manage</code> は同じヘッダ（タイムラインへのリンクあり）と、エラーの <code>p</code> だけ。フォームなし。<code>script</code> なし。</p>
+<p>ビルド済みタイムラインの HTML は親仕様・タイムライン仕様のままである。<code>nav</code> / 管理へのリンク / <code>script</code> を足さない。</p>
+</section>
+<section>
+<h2 id="error-handling">Error handling</h2>
+<p><strong>起動失敗</strong>（プロセスは待たない。終了コード非ゼロ）:</p>
+<ul>
+<li>第一引数が <code>serve</code> でも空でもない。</li>
+<li>ビルドに <code>--port</code> など未知の引数がある。</li>
+<li><code>--port</code> が整数でない、範囲外（1〜65535 以外）、serve の未知引数。</li>
+<li><code>127.0.0.1:{port}</code> を取れない（使用中を含む）。</li>
+</ul>
+<p><strong>GET / POST 以外</strong>: 405。YAML も <code>site/</code> も触らない。</p>
+<p><strong>Origin 不一致・Origin も Referer も無い POST</strong>: 403。YAML を触らない。</p>
+<p><strong>POST の本文が 64 KiB 超、または Content-Type が上記でない</strong>: 400。YAML を触らない。</p>
+<p><strong>POST 先が <code>/manage</code> 以外</strong>: 405。YAML を触らない。</p>
+<p><strong>設定が読めない</strong>（ファイル無し、UTF-8 でない、親仕様の Config 違反、0 件）:</p>
+<ul>
+<li>GET <code>/manage</code>: 200。ヘッダとエラーのみ。フォームなし。</li>
+<li>POST <code>/manage</code>: Origin とサイズと Content-Type を見たあと、YAML を触らず 200。同じエラー表示。フォームなし。</li>
+<li>GET <code>/</code> と <code>site/</code> の静的出しは、YAML に依存しない。</li>
+</ul>
+<p><strong>クエリ不正</strong>（<code>edit</code> と <code>confirm_delete</code> の同時、空値、無い <code>name</code>、最後の1件の <code>confirm_delete</code>）: 200 で一覧+追加とエラー。確認専用にも編集フォームにもしない。YAML を触らない。</p>
+<p><strong>衝突</strong>（<code>hash</code> 不一致または欠落）: YAML を触らず 200。一覧+追加と衝突エラー。入力値は戻さない。</p>
+<p><strong><code>action</code> 不正・欠落</strong>: YAML を触らず 200。一覧+追加とエラー。</p>
+<p><strong>add / edit の検証失敗</strong>（親仕様の Config と同じ: 空名、重複名、更新源ゼロ、不正 URL）: YAML を触らず 200。エラーと入力値を残す。add なら追加フォームに残す。edit ならその件の編集フォームのまま（<code>original_name</code> 基準）。一覧の他件は読むだけ。</p>
+<p><strong>edit で <code>original_name</code> が YAML に無い</strong>: YAML を触らず 200。一覧+追加とエラー。編集フォームにはしない。入力値は戻さない。</p>
+<p><strong>delete で <code>name</code> が無い、または削除すると 0 件になる</strong>: YAML を触らず 200。一覧+追加とエラー。確認専用にはしない。</p>
+<p><strong>書き出し失敗</strong>（権限、ディスク、置換失敗）: 既存の <code>watchlist.yml</code> を残す。200 でエラー。成功時と同じく壊れた中間ファイルを残さない。</p>
+<p><strong>静的ファイル</strong>: 予約パス以外でファイルが無い、または <code>site/</code> の外になるパス → 404。<code>/</code> で <code>index.html</code> が無いこと自体はエラーではなく、未ビルド説明ページ（200）。</p>
+<p>取り込み失敗の扱い（源のスキップ等）はこの spec の対象外（親仕様のまま）。serve は保存時も起動時もフィードを取りに行かない。</p>
+</section>
+<section>
+<h2 id="numeric-defaults">Numeric defaults</h2>
+<ul>
+<li>待ち受け: <code>127.0.0.1</code>。既定ポート 8000。<code>--port</code> は 1〜65535。</li>
+<li>許可 Origin: <code>http://127.0.0.1:{port}</code> のみ（実際に待っているポート）。</li>
+<li>POST 本文上限: 64 KiB。</li>
+<li>衝突ハッシュ: SHA-256、小文字 hex、ファイルの生バイト。</li>
+<li>成功: 303、<code>Location: /manage</code>。</li>
+<li>管理 CSS パス: <code>/manage.css</code>。管理パス: <code>/manage</code>（末尾スラッシュ同一）。</li>
+<li>クエリ: <code>edit</code>, <code>confirm_delete</code>。</li>
+<li>フォーム <code>action</code>: <code>add</code> | <code>edit</code> | <code>delete</code>。</li>
+<li>Python: 3.11 以上（親仕様）。HTTP 取り込みの 15 秒・2 MiB はこの spec では触らない。</li>
+</ul>
+</section>
+<section>
+<h2 id="否定と順序">否定と順序</h2>
+<ul>
+<li>GET は YAML を変えない。削除の確定は POST。確認用 GET はまだ消さない。</li>
+<li>最後の1件に削除リンクを出さない。出なくても POST なら拒否する。</li>
+<li>追加はリスト末尾。改名は位置を維持。並び替え UI なし。</li>
+<li>画面保存はファイル全体の正規化置き換え。部分置換しない。</li>
+<li>成功メッセージ用のクエリもフラッシュも無い。</li>
+<li><code>localhost</code> を案内しない。その Origin の書き込みは 403。</li>
+<li>管理画面を <code>site/</code> に書かない。ビルドは管理 HTML を出さない。</li>
+<li>serve は保存時も起動時もビルドしない。</li>
+</ul>
+</section>
+<section>
+<h2 id="consuming-paths">Consuming paths</h2>
+<ul>
+<li>ウォッチ対象の正本は今までどおり <code>watchlist.yml</code>。手編集してよい。</li>
+<li>タイムラインを出す: リポジトリ直下で <code>python -m libwatch</code>（引数なし、親仕様のまま）。</li>
+<li>ローカルで読む・管理する: 同じディレクトリで <code>python -m libwatch serve</code>。ブラウザは起動時に出た <code>http://127.0.0.1:8000/</code> と <code>http://127.0.0.1:8000/manage</code> を開く（ポートを変えたらその URL）。</li>
+<li>ポート変更: <code>python -m libwatch serve --port 8001</code>。</li>
+<li>停止は <code>Ctrl+C</code>。</li>
+<li>README の <code>python -m http.server --directory site --bind 127.0.0.1 8000</code> はこの serve に置き換える。コピーした <code>site/</code> をサーバ無しで開く手順は残してよい。</li>
+<li>GitHub Actions は今どおりビルドだけ。serve は載せない。</li>
+<li>画面で保存したあとにタイムラインへ新しい更新を載せるには、今までどおりビルドする。serve は再起動しなくてよい（<code>/</code> はディスク上の <code>site/</code> を読む）。</li>
+</ul>
+</section>
+<section>
+<h2 id="testing">Testing</h2>
+<p>既定テストはネットワークに出ない。フィード取得の差し込みは親仕様のまま。serve のテストは <code>127.0.0.1</code> に対するプロセス内（または同等）の HTTP でよい。外部ホストへは出ない。スクリーンショットは取らない。</p>
+<p>残す（親仕様・タイムライン仕様）:</p>
+<ul>
+<li>設定検証、取り込みスキップ、マージ、<code>site/</code> のタイムライン HTML/CSS、空メッセージ「更新はまだない」。</li>
+<li>ビルド成果物に <code>script</code> が無い。管理用 HTML を <code>site/</code> に書かない。</li>
+</ul>
+<p>足す:</p>
+<ul>
+<li>引数なしはビルド。第一引数 <code>serve</code> と <code>--port</code> は serve だけ。不正な <code>--port</code>、未知引数、<code>serve</code> 以外の第一引数は起動失敗。</li>
+<li><code>site/index.html</code> が無い GET <code>/</code> は 200 で「タイムラインはまだビルドされていない」。<code>/manage.css</code> を参照する。管理へのリンクも <code>script</code> も無い。</li>
+<li><code>site/index.html</code> がある GET <code>/</code> はそのファイル。管理リンクを足さない。</li>
+<li>GET <code>/manage</code> は YAML 順の一覧と追加フォーム。1件のときは削除リンクが無い。2件以上なら各件に削除リンクがある。</li>
+<li>GET <code>?edit=</code> はその1件だけ編集フォーム。YAML を変えない。</li>
+<li>GET <code>?confirm_delete=</code> は確認専用。YAML を変えない。最後の1件や無い名前は一覧+エラー。</li>
+<li>POST add は末尾に足し、303 で <code>/manage</code>。再 GET で新しい件がある。</li>
+<li>POST edit は改名でき、位置は変わらない。衝突する <code>name</code> は保存しない。</li>
+<li>POST delete は消え、タイムライン成果物は変えない。最後の1件の POST は保存しない。</li>
+<li>手で YAML を変えたあと古い <code>hash</code> の POST は保存しない。</li>
+<li>不正 URL・更新源ゼロ・重複名の POST は 200 で入力を残し、ファイルは変わらない。</li>
+<li>Origin 無し / <code>http://localhost:{port}</code> / 別ポート の POST は 403、ファイルは変わらない。<code>Origin: http://127.0.0.1:{port}</code> は通る。</li>
+<li><code>site/manage.html</code> があっても GET <code>/manage</code> はプロセスの管理画面。</li>
+<li>画面保存後の YAML は <code>targets</code> のみ。<code>releases</code> は解決済み atom URL。コメントは残らない。</li>
+<li>GET だけでは <code>watchlist.yml</code> のバイトが変わらない。</li>
+<li>既定テストランナーはネットワークに接続しない。</li>
+</ul>
+</section>
+<section>
+<h2 id="親仕様との衝突">親仕様との衝突</h2>
+<p>衝突したら、管理プロセス・管理画面・<code>watchlist.yml</code> の画面からの書き込み・README のローカルプレビューはこのファイル。設定の形、取り込み、マージ、ビルド成果物のタイムライン HTML/CSS は親仕様（タイムライン見た目は 2026-08-31）。親の non-goal「画面からウォッチ対象を登録する UI」と「実行時サーバは無い」は、このファイルの Goals のとおり狭める。</p>
+</section>
+
+</main>
+</body>
+</html>

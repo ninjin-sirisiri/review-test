@@ -2,15 +2,25 @@
 <html lang="und">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src &#x27;none&#x27;; img-src &#x27;self&#x27; data:; style-src &#x27;self&#x27;; base-uri &#x27;none&#x27;; form-action &#x27;none&#x27;; frame-ancestors &#x27;none&#x27;">
 <title>ライブラリ更新ウォッチ</title>
 <link rel="stylesheet" href="docs/sdd/assets/sdd.css">
 </head>
 <body>
+<header>
+<p>Glossary</p>
+<nav aria-label="On this page">
+<ul>
+<li><a href="#terms">Terms</a></li>
+</ul>
+</nav>
+</header>
 <main>
-<h1>ライブラリ更新ウォッチ</h1>
+<h1 id="ライブラリ更新ウォッチ">ライブラリ更新ウォッチ</h1>
 <p>読者が選んだライブラリ・フレームワークの公式更新を、1画面で読むための文脈。</p>
-<h2>Terms</h2>
+<section>
+<h2 id="terms">Terms</h2>
 <p><strong>ウォッチリスト</strong>:
 読者ひとりが追うウォッチ対象の集合。サイトに出る更新はこの集合に限る。正本は設定ファイル。</p>
 <p><em>Avoid</em>: 公開ディレクトリ, カタログ, 全エコシステムの横断索引, 共有ウォッチリスト</p>
@@ -19,7 +29,7 @@
 <p><em>Avoid</em>: 画面からの登録を必須にする, DB 上のウォッチリスト</p>
 <p><strong>ウォッチ対象</strong>:
 ウォッチリストの登録単位。ライブラリまたはフレームワーク。更新源（公式ブログとリリースノート）をこの対象に紐づける。</p>
-<p><em>Avoid</em>: フィード単体の登録, カタログから選ぶだけの項目</p>
+<p><em>Avoid</em>: フィード単体の登録, カタログから選ぶだけの項目, 購読, 購読するライブラリ</p>
 <p><strong>読者</strong>:
 ウォッチリストを一人で持つ人。設定ファイルにウォッチ対象と更新源を書き、生成されたタイムラインを読む。</p>
 <p><em>Avoid</em>: 共有ウォッチリスト, 不特定の公開閲覧者, 少人数の共同編集</p>
@@ -32,6 +42,9 @@
 <p><strong>タイムライン</strong>:
 全ウォッチ対象の更新を、1本の時系列に混ぜた並び。読者が見る1画面。新しい順。既読は持たない。</p>
 <p><em>Avoid</em>: ウォッチ対象ごとのリストだけ, 対象別ページ必須, 既読未読</p>
+<p><strong>管理画面</strong>:
+読者がウォッチ対象を追加・編集・削除する画面。設定ファイルを書き換える。タイムラインとは別。</p>
+<p><em>Avoid</em>: タイムライン上の登録 UI, 画面を正本にする, 公開サイトからの保存, 静的成果物に含める</p>
 <p><strong>公式ブログ</strong>:
 ライブラリ・フレームワークの公式が出す記事。更新の一種。更新源はフィード。</p>
 <p><strong>フィード</strong>:
@@ -41,6 +54,7 @@ RSS または Atom。公式ブログ用の更新源として読者が指定す�
 <p><strong>更新源</strong>:
 ウォッチ対象に紐づく、更新の取り出し元。公式ブログはフィード、リリースノートは GitHub Releases の URL。読者が指定する。</p>
 <p><em>Avoid</em>: ウォッチ対象そのもの, フィード単体のウォッチリスト項目, 自動推定, プリセット必須, ブログページ URL からの推定, 任意 URL</p>
+</section>
 
 </main>
 </body>

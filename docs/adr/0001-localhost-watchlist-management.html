@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html lang="und">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src &#x27;none&#x27;; img-src &#x27;self&#x27; data:; style-src &#x27;self&#x27;; base-uri &#x27;none&#x27;; form-action &#x27;none&#x27;; frame-ancestors &#x27;none&#x27;">
+<title>管理画面は localhost のプロセスだけが出す</title>
+<link rel="stylesheet" href="../sdd/assets/sdd.css">
+</head>
+<body>
+<header>
+<p>ADR</p>
+</header>
+<main>
+<h1 id="管理画面は-localhost-のプロセスだけが出す">管理画面は localhost のプロセスだけが出す</h1>
+<p>ウォッチ対象を画面から変えたいが、正本は設定ファイルで、読む成果物は静的である。管理 HTML は <code>127.0.0.1</code> のプロセスだけが出し、<code>site/</code> には書かない。コピーした成果物を読むだけに保ち、画面登録を必須にしないためである。</p>
+
+</main>
+</body>
+</html>

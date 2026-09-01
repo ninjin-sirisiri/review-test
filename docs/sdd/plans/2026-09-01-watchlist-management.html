@@ -1,0 +1,953 @@
+<!DOCTYPE html>
+<html lang="und">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src &#x27;none&#x27;; img-src &#x27;self&#x27; data:; style-src &#x27;self&#x27;; base-uri &#x27;none&#x27;; form-action &#x27;none&#x27;; frame-ancestors &#x27;none&#x27;">
+<title>管理画面からのウォッチ対象の変更 Implementation Plan</title>
+<link rel="stylesheet" href="../assets/sdd.css">
+</head>
+<body>
+<header>
+<p>Plan</p>
+<nav aria-label="On this page">
+<ul>
+<li><a href="#global-constraints">Global Constraints</a></li>
+<li><a href="#file-structure">File structure</a></li>
+<li><a href="#task-1-ウォッチリスト-yaml-の正規化書き込み">Task 1: ウォッチリスト YAML の正規化書き込み</a></li>
+<li><a href="#task-2-localhost-の管理プロセス">Task 2: localhost の管理プロセス</a></li>
+<li><a href="#task-3-readme-のローカルプレビューを-serve-に替える">Task 3: README のローカルプレビューを serve に替える</a></li>
+<li><a href="#サイトの生成">サイトの生成</a></li>
+<li><a href="#ローカルプレビューと管理">ローカルプレビューと管理</a></li>
+</ul>
+</nav>
+</header>
+<main>
+<h1 id="管理画面からのウォッチ対象の変更-implementation-plan">管理画面からのウォッチ対象の変更 Implementation Plan</h1>
+<p><strong>Goal:</strong> 読者が <code>python -m libwatch serve</code> の管理画面からウォッチ対象を追加・編集・削除し、正本の <code>watchlist.yml</code> だけを更新する。</p>
+<p><strong>Architecture:</strong> 引数なしのビルドは今のまま <code>site/</code> にタイムラインを書く。<code>serve</code> は <code>127.0.0.1</code> だけで静的 <code>site/</code> と管理画面を出し、POST は YAML を正規化して書きビルドしない。管理 HTML はプロセスだけが出し、<code>site/</code> には書かない。</p>
+<p><strong>Tech Stack:</strong> Python 3.11+、pytest、PyYAML、stdlib <code>http.server</code> / <code>http.client</code> / <code>hashlib</code> / <code>html</code> / <code>urllib.parse</code>。新しい依存は足さない。テストは <code>uv run python -m pytest</code>。既定テストはネットワークに出ない。</p>
+<p><strong>Spec:</strong> docs/sdd/specs/2026-09-01-watchlist-management-design.md</p>
+<section>
+<h2 id="global-constraints">Global Constraints</h2>
+<ul>
+<li>待ち受け: <code>127.0.0.1</code>。既定ポート 8000。<code>--port</code> は 1〜65535。使用中なら起動失敗。</li>
+<li>許可 Origin: <code>http://127.0.0.1:{port}</code> のみ（実際に待っているポート）。<code>localhost</code> は案内しない。その Origin の書き込みは 403。</li>
+<li>POST 本文上限: 64 KiB。</li>
+<li>衝突ハッシュ: SHA-256、小文字 hex、ファイルの生バイト。</li>
+<li>成功: 303、<code>Location: /manage</code>。成功メッセージ用クエリなし。</li>
+<li>管理 CSS パス: <code>/manage.css</code>。管理パス: <code>/manage</code>（末尾スラッシュ同一）。予約パスは <code>site/</code> より優先。</li>
+<li>クエリ: <code>edit</code>, <code>confirm_delete</code>。フォーム <code>action</code>: <code>add</code> | <code>edit</code> | <code>delete</code>。</li>
+<li>GET は YAML を変えない。追加・編集・削除の確定は POST だけ。</li>
+<li>最後の1件に削除リンクを出さない。POST でも 0 件になる削除は拒否。</li>
+<li>追加はリスト末尾。改名は位置を維持。並び替え UI なし。</li>
+<li>画面保存はファイル全体の正規化置き換え。コメントは残さない。<code>releases</code> は解決済み atom URL。</li>
+<li>管理画面に <code>script</code> を出さない。ビルド成果物に管理 HTML を書かない。読む画面から管理へのリンクを足さない。</li>
+<li>serve は保存時も起動時もビルドしない。フィードを取りに行かない。</li>
+<li>第一引数が無ければビルド。第一引数が <code>serve</code> なら管理プロセス。それ以外の第一引数は起動失敗。<code>--port</code> は serve 専用。</li>
+<li>未ビルドの <code>/</code> は 200 で「タイムラインはまだビルドされていない」。<code>/manage.css</code> を参照。管理へのリンクなし。</li>
+<li>衝突エラー文言: 「設定ファイルが他で変更されています」</li>
+<li>クエリ不正・無い名前の文言: 「そのウォッチ対象はありません」</li>
+<li>最後の1件削除の文言: 「最後のウォッチ対象は削除できません」</li>
+<li>不正 <code>action</code> の文言: 「不正な操作です」</li>
+<li>書き出し失敗の文言: 「保存できませんでした」</li>
+<li>既定テストはネットワークに出ない。スクリーンショットは取らない。外部ホストへは出ない。</li>
+<li>Python 3.11 以上。HTTP 取り込みの 15 秒・2 MiB は触らない。</li>
+<li>公開サイトからの保存、DB、ログイン、<code>0.0.0.0</code>、自動ビルド、管理画面の JS は作らない。</li>
+</ul>
+</section>
+<section>
+<h2 id="file-structure">File structure</h2>
+<table>
+<thead>
+<tr>
+  <th>Path</th>
+  <th>Responsibility</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+  <td><code>src/libwatch/config.py</code></td>
+  <td>読み込みに加え、テキストからの parse、正規化 dump、原子的書き込み、SHA-256</td>
+</tr>
+<tr>
+  <td><code>src/libwatch/manage.py</code></td>
+  <td>未ビルドページ、管理 HTML、管理 CSS。script なし</td>
+</tr>
+<tr>
+  <td><code>src/libwatch/serve.py</code></td>
+  <td><code>127.0.0.1</code> の HTTP、Origin 検査、GET/POST、CLI <code>serve_main</code></td>
+</tr>
+<tr>
+  <td><code>src/libwatch/__main__.py</code></td>
+  <td>引数なしはビルド、<code>serve</code> は <code>serve_main</code></td>
+</tr>
+<tr>
+  <td><code>src/libwatch/render.py</code></td>
+  <td>触らない</td>
+</tr>
+<tr>
+  <td><code>src/libwatch/build.py</code></td>
+  <td>触らない</td>
+</tr>
+<tr>
+  <td><code>src/libwatch/write.py</code></td>
+  <td>触らない</td>
+</tr>
+<tr>
+  <td><code>tests/test_dump.py</code></td>
+  <td>dump / hash / 原子的書き込み</td>
+</tr>
+<tr>
+  <td><code>tests/test_cli.py</code></td>
+  <td>引数の振り分け</td>
+</tr>
+<tr>
+  <td><code>tests/test_serve.py</code></td>
+  <td>HTTP の読み書き。<code>127.0.0.1</code> のみ</td>
+</tr>
+<tr>
+  <td><code>tests/test_render.py</code></td>
+  <td>触らない（タイムラインに管理リンクが無いことを今のテストが担保）</td>
+</tr>
+<tr>
+  <td><code>README.md</code></td>
+  <td>ローカルプレビューを <code>serve</code> に置き換え</td>
+</tr>
+</tbody>
+</table>
+<p>この表に無いアプリファイルを足さない。Node ツールチェーンを足さない。Flask 等は足さない。</p>
+</section>
+<section>
+<h2 id="task-1-ウォッチリスト-yaml-の正規化書き込み">Task 1: ウォッチリスト YAML の正規化書き込み</h2>
+<p><strong>Files:</strong></p>
+<ul>
+<li>Modify: <code>src/libwatch/config.py</code></li>
+<li>Create: <code>tests/test_dump.py</code></li>
+</ul>
+<p><strong>Interfaces:</strong></p>
+<ul>
+<li><p><code>parse_watchlist(text: str) -&gt; Watchlist</code> — 失敗は <code>ConfigError</code>。検証規則は今の <code>load_watchlist</code> と同じ。</p>
+</li>
+<li><p><code>load_watchlist(path: Path) -&gt; Watchlist</code> — ファイルを UTF-8 で読んで <code>parse_watchlist</code> に渡す。ファイル IO のエラーメッセージは今のまま（パスを含む）。</p>
+</li>
+<li><p><code>dump_watchlist(watchlist: Watchlist) -&gt; str</code> — UTF-8 向けテキスト。トップレベルは <code>targets</code> のみ。各件のキー順は <code>name</code>、あれば <code>blog</code>、あれば <code>releases</code>。無い任意キーは出さない。値は <code>WatchTarget</code> のまま（<code>releases</code> はすでに atom URL）。</p>
+</li>
+<li><p><code>write_watchlist(path: Path, text: str) -&gt; None</code> — 同じディレクトリの一時ファイルに書いて <code>os.replace</code>。失敗時は一時ファイルを消し、既存の <code>path</code> を残す。</p>
+</li>
+<li><p><code>sha256_hex(data: bytes) -&gt; str</code> — SHA-256 の小文字 hex。</p>
+</li>
+<li><p>[ ] <strong>Step 1: 失敗するテスト</strong></p>
+</li>
+</ul>
+<p><code>tests/test_dump.py</code> を次の内容にする。</p>
+<pre><code class="language-python">import os
+from pathlib import Path
+
+import pytest
+import yaml
+
+from libwatch.config import (
+    ConfigError,
+    WatchTarget,
+    Watchlist,
+    dump_watchlist,
+    load_watchlist,
+    parse_watchlist,
+    sha256_hex,
+    write_watchlist,
+)
+
+
+def test_parse_watchlist_roundtrip_values() -&gt; None:
+    text = &quot;&quot;&quot;\
+targets:
+  - name: &quot; React &quot;
+    blog: https://react.dev/rss.xml#frag
+    releases: https://github.com/facebook/react/releases
+&quot;&quot;&quot;
+    watchlist = parse_watchlist(text)
+    dumped = dump_watchlist(watchlist)
+    again = parse_watchlist(dumped)
+    assert again.targets == watchlist.targets
+    data = yaml.safe_load(dumped)
+    assert set(data.keys()) == {&quot;targets&quot;}
+    assert list(data[&quot;targets&quot;][0].keys()) == [&quot;name&quot;, &quot;blog&quot;, &quot;releases&quot;]
+    assert data[&quot;targets&quot;][0][&quot;name&quot;] == &quot;React&quot;
+    assert data[&quot;targets&quot;][0][&quot;blog&quot;] == &quot;https://react.dev/rss.xml&quot;
+    assert (
+        data[&quot;targets&quot;][0][&quot;releases&quot;]
+        == &quot;https://github.com/facebook/react/releases.atom&quot;
+    )
+    assert &quot;#frag&quot; not in dumped
+    assert &quot;facebook/react/releases\n&quot; not in dumped
+
+
+def test_dump_omits_missing_optional_keys() -&gt; None:
+    watchlist = parse_watchlist(
+        &quot;targets:\n  - name: A\n    blog: https://example.com/feed.xml\n&quot;
+    )
+    dumped = dump_watchlist(watchlist)
+    data = yaml.safe_load(dumped)
+    assert &quot;releases&quot; not in data[&quot;targets&quot;][0]
+    assert &quot;blog&quot; in data[&quot;targets&quot;][0]
+
+
+def test_dump_drops_comments() -&gt; None:
+    text = &quot;&quot;&quot;\
+# keep me
+targets:
+  - name: A
+    blog: https://example.com/feed.xml
+&quot;&quot;&quot;
+    dumped = dump_watchlist(parse_watchlist(text))
+    assert &quot;keep me&quot; not in dumped
+
+
+def test_sha256_hex_of_raw_bytes() -&gt; None:
+    assert sha256_hex(b&quot;abc&quot;) == (
+        &quot;ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad&quot;
+    )
+
+
+def test_write_watchlist_replaces_and_leaves_no_tmp(tmp_path: Path) -&gt; None:
+    path = tmp_path / &quot;watchlist.yml&quot;
+    path.write_text(&quot;OLD\n&quot;, encoding=&quot;utf-8&quot;)
+    write_watchlist(path, &quot;targets:\n  - name: A\n    blog: https://example.com/a.xml\n&quot;)
+    assert &quot;name: A&quot; in path.read_text(encoding=&quot;utf-8&quot;)
+    leftovers = [p.name for p in tmp_path.iterdir() if p.name != &quot;watchlist.yml&quot;]
+    assert leftovers == []
+
+
+def test_write_watchlist_keeps_old_file_if_replace_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -&gt; None:
+    path = tmp_path / &quot;watchlist.yml&quot;
+    path.write_text(&quot;OLD\n&quot;, encoding=&quot;utf-8&quot;)
+    original_replace = os.replace
+
+    def boom(src: str | os.PathLike[str], dst: str | os.PathLike[str]) -&gt; None:
+        raise OSError(&quot;nope&quot;)
+
+    monkeypatch.setattr(os, &quot;replace&quot;, boom)
+    with pytest.raises(OSError):
+        write_watchlist(path, &quot;NEW\n&quot;)
+    assert path.read_text(encoding=&quot;utf-8&quot;) == &quot;OLD\n&quot;
+    monkeypatch.setattr(os, &quot;replace&quot;, original_replace)
+    leftovers = [
+        p.name
+        for p in tmp_path.iterdir()
+        if p.name != &quot;watchlist.yml&quot; and not p.name.startswith(&quot;.&quot;)
+    ]
+    assert leftovers == []
+
+
+def test_load_watchlist_uses_parse(tmp_path: Path) -&gt; None:
+    path = tmp_path / &quot;watchlist.yml&quot;
+    path.write_text(
+        &quot;targets:\n  - name: A\n    blog: https://example.com/feed.xml\n&quot;,
+        encoding=&quot;utf-8&quot;,
+    )
+    assert load_watchlist(path).targets[0].name == &quot;A&quot;
+
+
+def test_parse_watchlist_rejects_empty() -&gt; None:
+    with pytest.raises(ConfigError):
+        parse_watchlist(&quot;targets: []\n&quot;)
+</code></pre>
+<ul>
+<li>[ ] <strong>Step 2: 失敗を確認</strong></li>
+</ul>
+<pre><code class="language-bash">uv run python -m pytest tests/test_dump.py -q
+</code></pre>
+<p><code>parse_watchlist</code> / <code>dump_watchlist</code> / <code>sha256_hex</code> / <code>write_watchlist</code> が無いため失敗する。</p>
+<ul>
+<li>[ ] <strong>Step 3: 実装</strong></li>
+</ul>
+<p><code>src/libwatch/config.py</code> の先頭 import に <code>hashlib</code>、<code>os</code>、<code>tempfile</code> を足す。<code>load_watchlist</code> の YAML 以降を <code>parse_watchlist</code> に移す。ファイル IO と <code>parse_watchlist</code> 呼び出しだけを <code>load_watchlist</code> に残す。YAML 解析エラーは <code>ConfigError(&quot;invalid YAML in watchlist&quot;)</code> でよい（パス無し）。既存の <code>tests/test_config.py</code> はメッセージを固定していないので通す。</p>
+<p>ファイル末尾に次を足す（既存の <code>_parse_target</code> 等は残す）。</p>
+<pre><code class="language-python">def parse_watchlist(text: str) -&gt; Watchlist:
+    try:
+        data = yaml.safe_load(text)
+    except yaml.YAMLError as exc:
+        raise ConfigError(&quot;invalid YAML in watchlist&quot;) from exc
+
+    if not isinstance(data, dict):
+        raise ConfigError(&quot;watchlist root must be a mapping&quot;)
+    if set(data.keys()) != {&quot;targets&quot;}:
+        raise ConfigError(&quot;watchlist root must contain only 'targets'&quot;)
+
+    targets_raw = data[&quot;targets&quot;]
+    if not isinstance(targets_raw, list) or len(targets_raw) == 0:
+        raise ConfigError(&quot;'targets' must be a non-empty list&quot;)
+
+    seen_names: set[str] = set()
+    targets: list[WatchTarget] = []
+    for item in targets_raw:
+        targets.append(_parse_target(item, seen_names))
+    return Watchlist(targets=tuple(targets))
+
+
+def dump_watchlist(watchlist: Watchlist) -&gt; str:
+    items: list[dict[str, str]] = []
+    for target in watchlist.targets:
+        item: dict[str, str] = {&quot;name&quot;: target.name}
+        if target.blog is not None:
+            item[&quot;blog&quot;] = target.blog
+        if target.releases is not None:
+            item[&quot;releases&quot;] = target.releases
+        items.append(item)
+    dumped = yaml.safe_dump(
+        {&quot;targets&quot;: items},
+        allow_unicode=True,
+        default_flow_style=False,
+        sort_keys=False,
+    )
+    if not dumped.endswith(&quot;\n&quot;):
+        dumped += &quot;\n&quot;
+    return dumped
+
+
+def write_watchlist(path: Path, text: str) -&gt; None:
+    directory = path.parent
+    directory.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=&quot;.watchlist.&quot;, suffix=&quot;.tmp&quot;, dir=directory)
+    tmp_path = Path(tmp)
+    try:
+        with os.fdopen(fd, &quot;w&quot;, encoding=&quot;utf-8&quot;) as handle:
+            handle.write(text)
+        os.replace(tmp_path, path)
+    except Exception:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+
+def sha256_hex(data: bytes) -&gt; str:
+    return hashlib.sha256(data).hexdigest()
+</code></pre>
+<p><code>load_watchlist</code> は読めた <code>text</code> を <code>return parse_watchlist(text)</code> する。<code>yaml.safe_load</code> の重複は <code>parse_watchlist</code> 側だけにする。</p>
+<ul>
+<li>[ ] <strong>Step 4: テストを通す</strong></li>
+</ul>
+<pre><code class="language-bash">uv run python -m pytest -q
+</code></pre>
+<p>全テストがネットワーク無しで緑。</p>
+<ul>
+<li>[ ] <strong>Step 5: コミット</strong></li>
+</ul>
+<pre><code class="language-bash">git add src/libwatch/config.py tests/test_dump.py
+git commit -m &quot;$(cat &lt;&lt;'EOF'
+ウォッチリスト YAML を正規化して原子的に書き出せるようにする。
+
+EOF
+)&quot;
+</code></pre>
+</section>
+<section>
+<h2 id="task-2-localhost-の管理プロセス">Task 2: localhost の管理プロセス</h2>
+<p><strong>Files:</strong></p>
+<ul>
+<li>Create: <code>src/libwatch/manage.py</code></li>
+<li>Create: <code>src/libwatch/serve.py</code></li>
+<li>Modify: <code>src/libwatch/__main__.py</code></li>
+<li>Create: <code>tests/test_cli.py</code></li>
+<li>Create: <code>tests/test_serve.py</code></li>
+</ul>
+<p><strong>Interfaces:</strong></p>
+<ul>
+<li><code>libwatch.__main__.main(argv: list[str] | None = None) -&gt; int</code> — <code>argv is None</code> なら <code>sys.argv[1:]</code>。空なら <code>build_main()</code>。<code>argv[0] == &quot;serve&quot;</code> なら <code>serve_main(argv[1:])</code>。それ以外は stderr に <code>unknown command: {argv[0]}</code> を書いて 1。</li>
+<li><code>serve_main(argv: list[str], *, cwd: Path | None = None, stdout: TextIO | None = None, stderr: TextIO | None = None) -&gt; int</code> — <code>cwd</code> 既定 <code>Path.cwd()</code>。<code>--port</code> だけ認める。既定 8000。整数でない・範囲外・未知引数は stderr に理由を書いて 1。bind 失敗も 1。成功時は待って 0（テストは <code>make_server</code> を使う）。</li>
+<li><code>make_server(cwd: Path, port: int) -&gt; HTTPServer</code> — <code>(&quot;127.0.0.1&quot;, port)</code>。<code>port == 0</code> はテスト用に OS が空きポートを付ける。CLI は 0 を渡さない。</li>
+<li><code>MANAGE_CSS: str</code> — タイムラインと同じトークン（<code>--text</code> / <code>--bg</code> / <code>--muted</code> / <code>--line</code> / <code>--accent</code>、<code>68ch</code>、<code>color-scheme: light dark</code>、<code>box-shadow</code> なし）。フォーム用の規則を足してよい。</li>
+<li><code>render_unbuilt_html() -&gt; str</code></li>
+<li><code>render_manage_html(...)</code> — 後述の Page。</li>
+</ul>
+<p>HTTP 規則は spec の Data flow / Error handling どおり。テストは <code>http.client.HTTPConnection(&quot;127.0.0.1&quot;, port)</code> を使う。外部ホスト名には接続しない。</p>
+<p>管理 HTML のボタン文言は「追加」「保存」「削除する」。キャンセルは <code>a href=&quot;/manage&quot;</code>。表示ラベルは「名前」「公式ブログ」「リリースノート」。</p>
+<ul>
+<li>[ ] <strong>Step 1: 失敗するテスト</strong></li>
+</ul>
+<p><code>tests/test_cli.py</code>:</p>
+<pre><code class="language-python">from io import StringIO
+
+from libwatch.__main__ import main
+
+
+def test_no_args_runs_build(monkeypatch) -&gt; None:
+    called = {&quot;n&quot;: 0}
+
+    def fake_build() -&gt; int:
+        called[&quot;n&quot;] += 1
+        return 0
+
+    monkeypatch.setattr(&quot;libwatch.__main__.build_main&quot;, fake_build)
+    assert main([]) == 0
+    assert called[&quot;n&quot;] == 1
+
+
+def test_unknown_command_is_error(capsys) -&gt; None:
+    assert main([&quot;build&quot;]) == 1
+    captured = capsys.readouterr()
+    assert &quot;unknown command: build&quot; in captured.err
+
+
+def test_serve_rejects_bad_port(monkeypatch) -&gt; None:
+    from libwatch.serve import serve_main
+
+    stderr = StringIO()
+    assert serve_main([&quot;--port&quot;, &quot;0&quot;], stderr=stderr) == 1
+    assert serve_main([&quot;--port&quot;, &quot;foo&quot;], stderr=stderr) == 1
+    assert serve_main([&quot;--host&quot;, &quot;127.0.0.1&quot;], stderr=stderr) == 1
+    assert serve_main([&quot;--port&quot;, &quot;8000&quot;, &quot;extra&quot;], stderr=stderr) == 1
+</code></pre>
+<p><code>tests/test_serve.py</code>:</p>
+<pre><code class="language-python">from __future__ import annotations
+
+import socket
+import threading
+from collections.abc import Iterator
+from http.client import HTTPConnection
+from pathlib import Path
+from urllib.parse import urlencode
+
+import pytest
+import yaml
+
+from libwatch.config import load_watchlist, sha256_hex
+from libwatch.serve import make_server
+
+
+def _free_port() -&gt; int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind((&quot;127.0.0.1&quot;, 0))
+        return int(sock.getsockname()[1])
+
+
+@pytest.fixture
+def cwd(tmp_path: Path) -&gt; Path:
+    (tmp_path / &quot;watchlist.yml&quot;).write_text(
+        &quot;targets:\n  - name: Python\n    blog: https://example.com/python.xml\n&quot;,
+        encoding=&quot;utf-8&quot;,
+    )
+    return tmp_path
+
+
+@pytest.fixture
+def port(cwd: Path) -&gt; Iterator[int]:
+    chosen = _free_port()
+    httpd = make_server(cwd, chosen)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield chosen
+    finally:
+        httpd.shutdown()
+        thread.join(timeout=5)
+        httpd.server_close()
+
+
+def _conn(port: int) -&gt; HTTPConnection:
+    return HTTPConnection(&quot;127.0.0.1&quot;, port, timeout=5)
+
+
+def _hash(cwd: Path) -&gt; str:
+    return sha256_hex((cwd / &quot;watchlist.yml&quot;).read_bytes())
+
+
+def test_unbuilt_root_is_200(port: int) -&gt; None:
+    conn = _conn(port)
+    conn.request(&quot;GET&quot;, &quot;/&quot;)
+    resp = conn.getresponse()
+    body = resp.read().decode(&quot;utf-8&quot;)
+    conn.close()
+    assert resp.status == 200
+    assert &quot;タイムラインはまだビルドされていない&quot; in body
+    assert 'href=&quot;/manage.css&quot;' in body
+    assert &quot;/manage\&quot;&quot; not in body.replace('href=&quot;/manage.css&quot;', &quot;&quot;)
+    assert &quot;&lt;script&quot; not in body
+    assert &quot;&lt;h1&gt;ライブラリ更新ウォッチ&lt;/h1&gt;&quot; in body
+
+
+def test_built_root_is_site_index(cwd: Path, port: int) -&gt; None:
+    site = cwd / &quot;site&quot;
+    site.mkdir()
+    (site / &quot;index.html&quot;).write_text(
+        &quot;&lt;!DOCTYPE html&gt;&lt;html lang=\&quot;ja\&quot;&gt;&lt;body&gt;&lt;h1&gt;ライブラリ更新ウォッチ&lt;/h1&gt;&lt;/body&gt;&lt;/html&gt;&quot;,
+        encoding=&quot;utf-8&quot;,
+    )
+    conn = _conn(port)
+    conn.request(&quot;GET&quot;, &quot;/&quot;)
+    resp = conn.getresponse()
+    body = resp.read().decode(&quot;utf-8&quot;)
+    conn.close()
+    assert resp.status == 200
+    assert &quot;ライブラリ更新ウォッチ&quot; in body
+    assert &quot;タイムラインはまだビルドされていない&quot; not in body
+    assert 'href=&quot;/manage&quot;' not in body
+
+
+def test_get_manage_lists_and_add_form_without_delete(cwd: Path, port: int) -&gt; None:
+    before = (cwd / &quot;watchlist.yml&quot;).read_bytes()
+    conn = _conn(port)
+    conn.request(&quot;GET&quot;, &quot;/manage&quot;)
+    resp = conn.getresponse()
+    body = resp.read().decode(&quot;utf-8&quot;)
+    conn.close()
+    assert resp.status == 200
+    assert &quot;&lt;title&gt;ウォッチ対象&lt;/title&gt;&quot; in body
+    assert &quot;Python&quot; in body
+    assert 'name=&quot;action&quot; value=&quot;add&quot;' in body
+    assert &quot;削除&quot; not in body
+    assert 'href=&quot;/&quot;' in body
+    assert &quot;&lt;script&quot; not in body
+    assert (cwd / &quot;watchlist.yml&quot;).read_bytes() == before
+
+
+def test_edit_query_does_not_write(cwd: Path, port: int) -&gt; None:
+    before = (cwd / &quot;watchlist.yml&quot;).read_bytes()
+    conn = _conn(port)
+    conn.request(&quot;GET&quot;, &quot;/manage?edit=Python&quot;)
+    resp = conn.getresponse()
+    body = resp.read().decode(&quot;utf-8&quot;)
+    conn.close()
+    assert resp.status == 200
+    assert 'name=&quot;action&quot; value=&quot;edit&quot;' in body
+    assert 'name=&quot;original_name&quot; value=&quot;Python&quot;' in body
+    assert (cwd / &quot;watchlist.yml&quot;).read_bytes() == before
+
+
+def test_confirm_delete_last_item_is_error(cwd: Path, port: int) -&gt; None:
+    conn = _conn(port)
+    conn.request(&quot;GET&quot;, &quot;/manage?confirm_delete=Python&quot;)
+    resp = conn.getresponse()
+    body = resp.read().decode(&quot;utf-8&quot;)
+    conn.close()
+    assert resp.status == 200
+    assert &quot;最後のウォッチ対象は削除できません&quot; in body
+    assert &quot;削除しますか&quot; not in body
+
+
+def test_unknown_edit_is_list_error(cwd: Path, port: int) -&gt; None:
+    conn = _conn(port)
+    conn.request(&quot;GET&quot;, &quot;/manage?edit=Nope&quot;)
+    resp = conn.getresponse()
+    body = resp.read().decode(&quot;utf-8&quot;)
+    conn.close()
+    assert &quot;そのウォッチ対象はありません&quot; in body
+    assert 'name=&quot;action&quot; value=&quot;edit&quot;' not in body
+
+
+def test_post_add_appends_and_redirects(cwd: Path, port: int) -&gt; None:
+    digest = _hash(cwd)
+    body = urlencode(
+        {
+            &quot;action&quot;: &quot;add&quot;,
+            &quot;hash&quot;: digest,
+            &quot;name&quot;: &quot;React&quot;,
+            &quot;blog&quot;: &quot;&quot;,
+            &quot;releases&quot;: &quot;https://github.com/facebook/react/releases&quot;,
+        }
+    )
+    conn = _conn(port)
+    conn.request(
+        &quot;POST&quot;,
+        &quot;/manage&quot;,
+        body=body,
+        headers={
+            &quot;Content-Type&quot;: &quot;application/x-www-form-urlencoded&quot;,
+            &quot;Origin&quot;: f&quot;http://127.0.0.1:{port}&quot;,
+        },
+    )
+    resp = conn.getresponse()
+    resp.read()
+    conn.close()
+    assert resp.status == 303
+    assert resp.getheader(&quot;Location&quot;) == &quot;/manage&quot;
+    names = [t.name for t in load_watchlist(cwd / &quot;watchlist.yml&quot;).targets]
+    assert names == [&quot;Python&quot;, &quot;React&quot;]
+    dumped = yaml.safe_load((cwd / &quot;watchlist.yml&quot;).read_text(encoding=&quot;utf-8&quot;))
+    assert dumped[&quot;targets&quot;][1][&quot;releases&quot;] == (
+        &quot;https://github.com/facebook/react/releases.atom&quot;
+    )
+
+
+def test_post_edit_renames_in_place(cwd: Path, port: int) -&gt; None:
+    (cwd / &quot;watchlist.yml&quot;).write_text(
+        &quot;\n&quot;.join(
+            [
+                &quot;targets:&quot;,
+                &quot;  - name: A&quot;,
+                &quot;    blog: https://example.com/a.xml&quot;,
+                &quot;  - name: B&quot;,
+                &quot;    blog: https://example.com/b.xml&quot;,
+                &quot;&quot;,
+            ]
+        ),
+        encoding=&quot;utf-8&quot;,
+    )
+    digest = _hash(cwd)
+    body = urlencode(
+        {
+            &quot;action&quot;: &quot;edit&quot;,
+            &quot;hash&quot;: digest,
+            &quot;original_name&quot;: &quot;A&quot;,
+            &quot;name&quot;: &quot;Alpha&quot;,
+            &quot;blog&quot;: &quot;https://example.com/a.xml&quot;,
+            &quot;releases&quot;: &quot;&quot;,
+        }
+    )
+    conn = _conn(port)
+    conn.request(
+        &quot;POST&quot;,
+        &quot;/manage&quot;,
+        body=body,
+        headers={
+            &quot;Content-Type&quot;: &quot;application/x-www-form-urlencoded&quot;,
+            &quot;Origin&quot;: f&quot;http://127.0.0.1:{port}&quot;,
+        },
+    )
+    resp = conn.getresponse()
+    resp.read()
+    conn.close()
+    assert resp.status == 303
+    names = [t.name for t in load_watchlist(cwd / &quot;watchlist.yml&quot;).targets]
+    assert names == [&quot;Alpha&quot;, &quot;B&quot;]
+
+
+def test_post_delete_last_rejected(cwd: Path, port: int) -&gt; None:
+    digest = _hash(cwd)
+    before = (cwd / &quot;watchlist.yml&quot;).read_bytes()
+    body = urlencode({&quot;action&quot;: &quot;delete&quot;, &quot;hash&quot;: digest, &quot;name&quot;: &quot;Python&quot;})
+    conn = _conn(port)
+    conn.request(
+        &quot;POST&quot;,
+        &quot;/manage&quot;,
+        body=body,
+        headers={
+            &quot;Content-Type&quot;: &quot;application/x-www-form-urlencoded&quot;,
+            &quot;Origin&quot;: f&quot;http://127.0.0.1:{port}&quot;,
+        },
+    )
+    resp = conn.getresponse()
+    page = resp.read().decode(&quot;utf-8&quot;)
+    conn.close()
+    assert resp.status == 200
+    assert &quot;最後のウォッチ対象は削除できません&quot; in page
+    assert (cwd / &quot;watchlist.yml&quot;).read_bytes() == before
+
+
+def test_stale_hash_rejected(cwd: Path, port: int) -&gt; None:
+    body = urlencode(
+        {
+            &quot;action&quot;: &quot;add&quot;,
+            &quot;hash&quot;: &quot;00&quot; * 32,
+            &quot;name&quot;: &quot;React&quot;,
+            &quot;blog&quot;: &quot;https://example.com/r.xml&quot;,
+            &quot;releases&quot;: &quot;&quot;,
+        }
+    )
+    before = (cwd / &quot;watchlist.yml&quot;).read_bytes()
+    conn = _conn(port)
+    conn.request(
+        &quot;POST&quot;,
+        &quot;/manage&quot;,
+        body=body,
+        headers={
+            &quot;Content-Type&quot;: &quot;application/x-www-form-urlencoded&quot;,
+            &quot;Origin&quot;: f&quot;http://127.0.0.1:{port}&quot;,
+        },
+    )
+    resp = conn.getresponse()
+    page = resp.read().decode(&quot;utf-8&quot;)
+    conn.close()
+    assert resp.status == 200
+    assert &quot;設定ファイルが他で変更されています&quot; in page
+    assert (cwd / &quot;watchlist.yml&quot;).read_bytes() == before
+
+
+def test_origin_required(cwd: Path, port: int) -&gt; None:
+    digest = _hash(cwd)
+    body = urlencode(
+        {
+            &quot;action&quot;: &quot;add&quot;,
+            &quot;hash&quot;: digest,
+            &quot;name&quot;: &quot;X&quot;,
+            &quot;blog&quot;: &quot;https://example.com/x.xml&quot;,
+            &quot;releases&quot;: &quot;&quot;,
+        }
+    )
+    before = (cwd / &quot;watchlist.yml&quot;).read_bytes()
+    conn = _conn(port)
+    conn.request(
+        &quot;POST&quot;,
+        &quot;/manage&quot;,
+        body=body,
+        headers={&quot;Content-Type&quot;: &quot;application/x-www-form-urlencoded&quot;},
+    )
+    resp = conn.getresponse()
+    resp.read()
+    conn.close()
+    assert resp.status == 403
+    assert (cwd / &quot;watchlist.yml&quot;).read_bytes() == before
+
+    conn = _conn(port)
+    conn.request(
+        &quot;POST&quot;,
+        &quot;/manage&quot;,
+        body=body,
+        headers={
+            &quot;Content-Type&quot;: &quot;application/x-www-form-urlencoded&quot;,
+            &quot;Origin&quot;: f&quot;http://localhost:{port}&quot;,
+        },
+    )
+    resp = conn.getresponse()
+    resp.read()
+    conn.close()
+    assert resp.status == 403
+    assert (cwd / &quot;watchlist.yml&quot;).read_bytes() == before
+
+
+def test_site_manage_html_does_not_win(cwd: Path, port: int) -&gt; None:
+    site = cwd / &quot;site&quot;
+    site.mkdir()
+    (site / &quot;manage.html&quot;).write_text(&quot;STATIC&quot;, encoding=&quot;utf-8&quot;)
+    conn = _conn(port)
+    conn.request(&quot;GET&quot;, &quot;/manage&quot;)
+    resp = conn.getresponse()
+    body = resp.read().decode(&quot;utf-8&quot;)
+    conn.close()
+    assert &quot;STATIC&quot; not in body
+    assert &quot;&lt;title&gt;ウォッチ対象&lt;/title&gt;&quot; in body
+
+
+def test_put_is_405(cwd: Path, port: int) -&gt; None:
+    before = (cwd / &quot;watchlist.yml&quot;).read_bytes()
+    conn = _conn(port)
+    conn.request(&quot;PUT&quot;, &quot;/manage&quot;)
+    resp = conn.getresponse()
+    resp.read()
+    conn.close()
+    assert resp.status == 405
+    assert (cwd / &quot;watchlist.yml&quot;).read_bytes() == before
+
+
+def test_duplicate_name_keeps_input(cwd: Path, port: int) -&gt; None:
+    digest = _hash(cwd)
+    before = (cwd / &quot;watchlist.yml&quot;).read_bytes()
+    body = urlencode(
+        {
+            &quot;action&quot;: &quot;add&quot;,
+            &quot;hash&quot;: digest,
+            &quot;name&quot;: &quot;Python&quot;,
+            &quot;blog&quot;: &quot;https://example.com/other.xml&quot;,
+            &quot;releases&quot;: &quot;&quot;,
+        }
+    )
+    conn = _conn(port)
+    conn.request(
+        &quot;POST&quot;,
+        &quot;/manage&quot;,
+        body=body,
+        headers={
+            &quot;Content-Type&quot;: &quot;application/x-www-form-urlencoded&quot;,
+            &quot;Origin&quot;: f&quot;http://127.0.0.1:{port}&quot;,
+        },
+    )
+    resp = conn.getresponse()
+    page = resp.read().decode(&quot;utf-8&quot;)
+    conn.close()
+    assert resp.status == 200
+    assert 'value=&quot;Python&quot;' in page
+    assert 'value=&quot;https://example.com/other.xml&quot;' in page
+    assert (cwd / &quot;watchlist.yml&quot;).read_bytes() == before
+
+
+def test_two_targets_show_delete_and_post_removes(cwd: Path, port: int) -&gt; None:
+    (cwd / &quot;watchlist.yml&quot;).write_text(
+        &quot;targets:\n&quot;
+        &quot;  - name: A\n    blog: https://example.com/a.xml\n&quot;
+        &quot;  - name: B\n    blog: https://example.com/b.xml\n&quot;,
+        encoding=&quot;utf-8&quot;,
+    )
+    site = cwd / &quot;site&quot;
+    site.mkdir()
+    (site / &quot;index.html&quot;).write_text(&quot;KEEP&quot;, encoding=&quot;utf-8&quot;)
+    conn = _conn(port)
+    conn.request(&quot;GET&quot;, &quot;/manage&quot;)
+    page = conn.getresponse().read().decode(&quot;utf-8&quot;)
+    conn.close()
+    assert &quot;confirm_delete=A&quot; in page
+    assert &quot;confirm_delete=B&quot; in page
+    digest = _hash(cwd)
+    body = urlencode({&quot;action&quot;: &quot;delete&quot;, &quot;hash&quot;: digest, &quot;name&quot;: &quot;A&quot;})
+    conn = _conn(port)
+    conn.request(
+        &quot;POST&quot;,
+        &quot;/manage&quot;,
+        body=body,
+        headers={
+            &quot;Content-Type&quot;: &quot;application/x-www-form-urlencoded&quot;,
+            &quot;Origin&quot;: f&quot;http://127.0.0.1:{port}&quot;,
+        },
+    )
+    resp = conn.getresponse()
+    resp.read()
+    conn.close()
+    assert resp.status == 303
+    names = [t.name for t in load_watchlist(cwd / &quot;watchlist.yml&quot;).targets]
+    assert names == [&quot;B&quot;]
+    assert (site / &quot;index.html&quot;).read_text(encoding=&quot;utf-8&quot;) == &quot;KEEP&quot;
+</code></pre>
+<ul>
+<li>[ ] <strong>Step 2: 失敗を確認</strong></li>
+</ul>
+<pre><code class="language-bash">uv run python -m pytest tests/test_cli.py tests/test_serve.py -q
+</code></pre>
+<p><code>main</code> / <code>make_server</code> が無いため失敗する。</p>
+<ul>
+<li>[ ] <strong>Step 3: 実装</strong></li>
+</ul>
+<p><code>src/libwatch/__main__.py</code> を次にする。<code>python -m libwatch</code> のときだけ <code>main()</code> する。pytest が <code>from libwatch.__main__ import main</code> してもプロセスを終えない。</p>
+<pre><code class="language-python">from __future__ import annotations
+
+import sys
+
+from libwatch.build import build_main
+from libwatch.serve import serve_main
+
+
+def main(argv: list[str] | None = None) -&gt; int:
+    args = list(sys.argv[1:] if argv is None else argv)
+    if not args:
+        return build_main()
+    if args[0] == &quot;serve&quot;:
+        return serve_main(args[1:])
+    print(f&quot;unknown command: {args[0]}&quot;, file=sys.stderr)
+    return 1
+
+
+if __name__ == &quot;__main__&quot;:
+    raise SystemExit(main())
+</code></pre>
+<p><code>src/libwatch/manage.py</code> は次を満たす HTML 文字列を返す。<code>html.escape(..., quote=True)</code> を名前・URL・エラー・hidden 値に使う。<code>script</code> を出さない。</p>
+<ul>
+<li><code>render_unbuilt_html()</code>: spec の未ビルド <code>/</code> の木。title と h1 は「ライブラリ更新ウォッチ」。本文は「タイムラインはまだビルドされていない」。<code>link href=&quot;/manage.css&quot;</code>。管理への <code>a</code> は出さない。</li>
+<li><code>render_manage_error_html(message: str)</code>: ヘッダ（h1「ウォッチ対象」、<code>a href=&quot;/&quot;</code>「タイムライン」）とエラーの <code>p</code> だけ。フォームなし。</li>
+<li><code>render_manage_html(*, targets, file_hash, error=None, mode=&quot;list&quot;, focus_name=None, form_name=&quot;&quot;, form_blog=&quot;&quot;, form_releases=&quot;&quot;)</code>:<ul>
+<li><code>mode == &quot;confirm&quot;</code>: 確認専用。<code>p</code>「{name} を削除しますか」。POST hidden <code>action=delete</code>, <code>hash</code>, <code>name</code>。ボタン「削除する」。キャンセル <code>href=&quot;/manage&quot;</code>。一覧・追加・編集なし。</li>
+<li>それ以外: 追加フォーム（hidden <code>action=add</code>, <code>hash</code>。フィールド name/blog/releases。ボタン「追加」）。<code>mode == &quot;edit&quot;</code> のとき <code>focus_name</code> の件だけ編集フォーム（hidden <code>action=edit</code>, <code>hash</code>, <code>original_name</code>。ボタン「保存」。キャンセル <code>href=&quot;/manage&quot;</code>）。他件は表示と「編集」リンク <code>href=&quot;/manage?edit={quote(name, safe='')}&quot;</code>。<code>len(targets) &gt;= 2</code> のときだけ「削除」リンク <code>href=&quot;/manage?confirm_delete={quote(name, safe='')}&quot;</code>。</li>
+<li><code>mode == &quot;list&quot;</code> で検証失敗の入力を戻すときは追加フォームに <code>form_*</code> を入れる。</li>
+<li><code>mode == &quot;edit&quot;</code> で検証失敗のときは編集フォームに <code>form_*</code> を入れる。</li>
+</ul>
+</li>
+<li><code>MANAGE_CSS</code>: <code>src/libwatch/render.py</code> の <code>RENDER_CSS</code> と同じ <code>:root</code> と <code>body</code> / <code>header</code> / <code>h1</code> 規則に加え、<code>label { display: block; margin-top: 0.75rem; }</code>、<code>input { width: 100%; }</code>、<code>button { margin-top: 1rem; }</code>。<code>box-shadow</code> と <code>script</code> は出さない。</li>
+</ul>
+<p><code>src/libwatch/serve.py</code>:</p>
+<ul>
+<li><code>MAX_POST_BYTES = 65536</code></li>
+<li><code>expected_origin(port: int) -&gt; str</code> は <code>http://127.0.0.1:{port}</code></li>
+<li>Origin ヘッダがあればその文字列だけを比較。無ければ <code>Referer</code> から <code>scheme://hostname:port</code>（ポート省略時は 80/443）を取り同じ文字列と比較。どちらも無ければ拒否。</li>
+<li><code>Content-Type</code> は <code>;</code> より前を strip して lower が <code>application/x-www-form-urlencoded</code></li>
+<li>パスは <code>urllib.parse.urlsplit</code> の path を unquote し、<code>/</code> で始まるよう正規化。<code>/manage</code> と <code>/manage/</code> は管理。<code>/manage.css</code> は CSS。それ以外は <code>cwd/site</code> 配下。<code>Path.resolve()</code> して <code>site.resolve()</code> の外なら 404。ディレクトリは 404。<code>index.html</code> は <code>/</code> だけ特別扱い（無ければ未ビルド HTML）。</li>
+<li>GET <code>/manage</code>: <code>watchlist.yml</code> をバイトで読む。UTF-8 / <code>parse_watchlist</code> 失敗なら <code>render_manage_error_html</code>（<code>ConfigError</code> の文字）。成功ならクエリを判定（両方ある・空・無い名前 → 「そのウォッチ対象はありません」で list。最後の1件の <code>confirm_delete</code> → 「最後のウォッチ対象は削除できません」で list。正規の confirm / edit / list）。</li>
+<li>POST <code>/manage</code>: spec の 1〜8。add は targets 末尾に dict を足して <code>yaml.safe_dump</code> → <code>parse_watchlist</code>。失敗なら 200 で追加フォームに入力を残す。edit は <code>original_name</code> の位置を置き換え、位置は変えない。delete は当該 name を除く。成功なら <code>dump_watchlist</code> + <code>write_watchlist</code> のあと 303。<code>write_watchlist</code> が例外なら既存ファイルを残し「保存できませんでした」。</li>
+<li><code>make_server</code>: <code>HTTPServer((&quot;127.0.0.1&quot;, port), Handler)</code>。Handler は <code>self.server.cwd</code> と <code>self.server.server_port</code> を使う。<code>log_message</code> は空実装。</li>
+<li><code>serve_main</code>: <code>argparse</code> で <code>--port</code> のみ（<code>allow_abbrev=False</code>）。default 8000。1〜65535 以外は 1。<code>make_server(cwd, port)</code> のあと stdout に spec の2行を書いて <code>serve_forever()</code>。<code>OSError</code> は stderr に出して 1。</li>
+<li>POST <code>/</code> や POST <code>/manage.css</code> は 405。</li>
+<li>2件以上の削除リンクが出ること。GET だけでは YAML バイトが変わらないこと。上のテストがカバーする。</li>
+</ul>
+<p><code>serve_main</code> がテストから bind しないよう、不正引数は <code>make_server</code> の前に return する。</p>
+<ul>
+<li>[ ] <strong>Step 4: テストを通す</strong></li>
+</ul>
+<pre><code class="language-bash">uv run python -m pytest -q
+</code></pre>
+<p>全テストがネットワーク無しで緑。失敗したら <code>127.0.0.1</code> 以外に繋いでいないかを先に見る。</p>
+<ul>
+<li>[ ] <strong>Step 5: コミット</strong></li>
+</ul>
+<pre><code class="language-bash">git add src/libwatch/manage.py src/libwatch/serve.py src/libwatch/__main__.py tests/test_cli.py tests/test_serve.py
+git commit -m &quot;$(cat &lt;&lt;'EOF'
+localhost でウォッチ対象を追加・編集・削除できる管理プロセスを足す。
+
+EOF
+)&quot;
+</code></pre>
+</section>
+<section>
+<h2 id="task-3-readme-のローカルプレビューを-serve-に替える">Task 3: README のローカルプレビューを serve に替える</h2>
+<p><strong>Files:</strong></p>
+<ul>
+<li>Modify: <code>README.md</code></li>
+</ul>
+<p><strong>Interfaces:</strong> なし。アプリコードは触らない。</p>
+<ul>
+<li>[ ] <strong>Step 1: README を直す</strong></li>
+</ul>
+<p><code>README.md</code> を次にする。コードブロック以外の説明も、読む成果物にサーバは不要であることと、管理・ローカルプレビューは <code>serve</code> であることを書く。<code>python -m http.server</code> は出さない。コピーした <code>site/</code> をサーバ無しで開いてよいことは残す。GitHub Actions には触れない。</p>
+<pre><code class="language-markdown"># libwatch
+
+ウォッチリストに登録したライブラリの公式ブログと GitHub Releases を、1本のタイムラインで見る静的サイトです。読む成果物はビルドが `site/` に書く HTML で、公開用にアプリサーバは不要です。ウォッチ対象の正本は `watchlist.yml` です。手編集してもよいです。ローカルでプレビューし、画面からウォッチ対象を増減するときだけ管理プロセスを使います。
+
+## 必要環境
+
+- Python 3.11 以上
+- [uv](https://docs.astral.sh/uv/)
+
+## セットアップ
+
+```bash
+uv sync
+</code></pre>
+</section>
+<section>
+<h2 id="サイトの生成">サイトの生成</h2>
+<p>リポジトリ直下で次を実行します。ウォッチ対象の正本は <code>watchlist.yml</code>、成果物は <code>site/index.html</code> と <code>site/style.css</code> です。</p>
+<pre><code class="language-bash">uv run python -m libwatch
+</code></pre>
+<p>生成した <code>site/</code> は、サーバ無しでファイルとして開いても読めます。</p>
+</section>
+<section>
+<h2 id="ローカルプレビューと管理">ローカルプレビューと管理</h2>
+<p>同じディレクトリで次を実行します。待ち受けは <code>127.0.0.1</code> だけです。</p>
+<pre><code class="language-bash">uv run python -m libwatch serve
+</code></pre>
+<p>起動時に表示される <code>http://127.0.0.1:8000/</code>（タイムライン）と <code>http://127.0.0.1:8000/manage</code>（ウォッチ対象の追加・編集・削除）をブラウザで開きます。<code>localhost</code> というホスト名は使わないでください。停止は <code>Ctrl+C</code> です。</p>
+<p>ポートを変える例:</p>
+<pre><code class="language-bash">uv run python -m libwatch serve --port 8001
+</code></pre>
+<p>画面で <code>watchlist.yml</code> を変えたあとにタイムラインへ新しい更新を載せるには、もう一度 <code>uv run python -m libwatch</code> でビルドします。管理プロセスは再起動しなくて構いません。ページを再読み込みしてください。</p>
+<pre><code>
+内側のフェンスが壊れないよう、実装時は README 全体を上記の本文にする。ネストした ``` は、内側をインデント 4 スペースのコードブロックにするか、外側だけを使う。この計画では「README の見出しとコマンドは上のブロックと同一の文言にする」を正とし、Markdown のフェンスはファイルとして妥当な入れ子（内側コマンドはインデント付きフェンスなし、またはチルダフェンス）にする。実装者は次の構造にする。
+
+- 見出しと段落は上の文章どおり
+- コマンドは単独の ` ```bash ` フェンス
+- `http.server` という文字列はファイルに出さない
+- `127.0.0.1:8000/manage` を含める
+- 「サーバ無しでファイルとして開いても読めます」を含める
+
+- [ ] **Step 2: 確認**
+
+```bash
+uv run python -m pytest -q
+rg -n &quot;http.server&quot; README.md
+</code></pre>
+<p>テストは緑。<code>rg</code> は一致なし（終了コード 1）。<code>rg</code> が無ければ <code>grep -n &quot;http.server&quot; README.md</code> で一致なし。</p>
+<ul>
+<li>[ ] <strong>Step 3: コミット</strong></li>
+</ul>
+<pre><code class="language-bash">git add README.md
+git commit -m &quot;$(cat &lt;&lt;'EOF'
+ローカル確認と管理を libwatch serve に案内する。
+
+EOF
+)&quot;
+</code></pre>
+</section>
+
+</main>
+</body>
+</html>

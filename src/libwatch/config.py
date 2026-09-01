@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import hashlib
+import os
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse, urlunparse
@@ -35,10 +38,14 @@ def load_watchlist(path: Path) -> Watchlist:
     except OSError as exc:
         raise ConfigError(f"cannot read watchlist: {path}") from exc
 
+    return parse_watchlist(text)
+
+
+def parse_watchlist(text: str) -> Watchlist:
     try:
         data = yaml.safe_load(text)
     except yaml.YAMLError as exc:
-        raise ConfigError(f"invalid YAML in watchlist: {path}") from exc
+        raise ConfigError("invalid YAML in watchlist") from exc
 
     if not isinstance(data, dict):
         raise ConfigError("watchlist root must be a mapping")
@@ -115,3 +122,44 @@ def _normalize_blog(url: str) -> str:
     return urlunparse(
         (parsed.scheme, parsed.netloc, parsed.path, parsed.params, parsed.query, "")
     )
+
+
+def dump_watchlist(watchlist: Watchlist) -> str:
+    items: list[dict[str, str]] = []
+    for target in watchlist.targets:
+        item: dict[str, str] = {"name": target.name}
+        if target.blog is not None:
+            item["blog"] = target.blog
+        if target.releases is not None:
+            item["releases"] = target.releases
+        items.append(item)
+    dumped = yaml.safe_dump(
+        {"targets": items},
+        allow_unicode=True,
+        default_flow_style=False,
+        sort_keys=False,
+    )
+    if not dumped.endswith("\n"):
+        dumped += "\n"
+    return dumped
+
+
+def write_watchlist(path: Path, text: str) -> None:
+    directory = path.parent
+    directory.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=".watchlist.", suffix=".tmp", dir=directory)
+    tmp_path = Path(tmp)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        os.replace(tmp_path, path)
+    except Exception:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+
+def sha256_hex(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
